@@ -41,6 +41,9 @@ class GeoIPResolver:
         empty case to render. Other failures are swallowed too: geo is decoration,
         never a reason to lose an alert. city alone stays None where the database
         knows the country but not the city (anycast, e.g. 8.8.8.8).
+
+        The country arrives twice: the name reads, the iso code fits a narrow
+        terminal column and is what a flag glyph is derived from.
         """
         if self._reader is None or not _is_public(ip):
             return None
@@ -50,4 +53,8 @@ class GeoIPResolver:
             return None
         if response.country.name is None:
             return None
-        return {"country": response.country.name, "city": response.city.name}
+        return {
+            "country": response.country.name,
+            "iso":     response.country.iso_code,
+            "city":    response.city.name,
+        }

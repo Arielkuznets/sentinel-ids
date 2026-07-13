@@ -17,10 +17,10 @@ _REAL_DB = Path(__file__).resolve().parent.parent / "data" / "GeoLite2-City.mmdb
 class _FakeReader:
     """Answers with a fixed place, and records what it was asked."""
 
-    def __init__(self, country="Israel", city="Tel Aviv"):
+    def __init__(self, country="Israel", iso="IL", city="Tel Aviv"):
         self.asked: list[str] = []
         self._response = SimpleNamespace(
-            country = SimpleNamespace(name=country),
+            country = SimpleNamespace(name=country, iso_code=iso),
             city    = SimpleNamespace(name=city),
         )
 
@@ -36,12 +36,12 @@ class _NotFoundReader:
 
 def test_public_ip_resolves_to_country_and_city():
     resolver = GeoIPResolver(_FakeReader())
-    assert resolver.lookup("8.8.8.8") == {"country": "Israel", "city": "Tel Aviv"}
+    assert resolver.lookup("8.8.8.8") == {"country": "Israel", "iso": "IL", "city": "Tel Aviv"}
 
 
 def test_country_without_a_city_keeps_the_city_empty():
-    resolver = GeoIPResolver(_FakeReader(country="United States", city=None))
-    assert resolver.lookup("8.8.8.8") == {"country": "United States", "city": None}
+    resolver = GeoIPResolver(_FakeReader(country="United States", iso="US", city=None))
+    assert resolver.lookup("8.8.8.8") == {"country": "United States", "iso": "US", "city": None}
 
 
 @pytest.mark.parametrize("ip", ["127.0.0.1", "192.168.1.10", "10.0.0.5", "169.254.1.1",
@@ -70,4 +70,7 @@ def test_no_path_configured_disables_the_resolver():
 @pytest.mark.skipif(not _REAL_DB.is_file(), reason="GeoLite2 database not installed")
 def test_the_real_database_places_googles_resolver_in_the_united_states():
     resolver = GeoIPResolver.from_path(_REAL_DB.as_posix())
-    assert resolver.lookup("8.8.8.8")["country"] == "United States"
+    geo = resolver.lookup("8.8.8.8")
+    assert geo["country"] == "United States"
+    assert geo["iso"] == "US"
+    assert geo["city"] is None      # anycast: a country, no city

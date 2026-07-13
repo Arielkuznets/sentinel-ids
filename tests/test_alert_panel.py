@@ -63,3 +63,30 @@ def test_deviation_is_not_repeated_in_the_details_dump():
     line = format_alert_line(_alert(score=63, mac="aa:bb:cc", deviation=3.5), count=1)
     assert line.count("z=3.5") == 1
     assert "deviation=" not in line
+
+
+def test_a_located_source_shows_its_country_and_city():
+    geo  = {"country": "Russia", "iso": "RU", "city": "Moscow"}
+    line = format_alert_line(_alert(score=63, geo=geo), count=1)
+    assert "(RU/Moscow)" in line
+
+
+def test_a_country_without_a_city_shows_the_country_alone():
+    geo  = {"country": "United States", "iso": "US", "city": None}
+    line = format_alert_line(_alert(score=63, geo=geo), count=1)
+    assert "(US)" in line
+    assert "None" not in line
+
+
+def test_a_source_with_no_location_shows_nothing():
+    # Every source on an internal network is private and has no location. A
+    # placeholder on each of those lines would be noise, not information.
+    line = format_alert_line(_alert(score=63, geo=None), count=1)
+    assert "(" not in line.split("src=")[1]
+
+
+def test_the_location_is_not_dumped_raw_beside_the_detector_details():
+    geo  = {"country": "Russia", "iso": "RU", "city": "Moscow"}
+    line = format_alert_line(_alert(score=63, mac="aa:bb:cc", geo=geo), count=1)
+    assert "geo=" not in line
+    assert "mac=aa:bb:cc" in line
