@@ -36,6 +36,8 @@ detectors:
 alerts:
   dedup_window_seconds: 60
   pcap_capture_seconds: 30
+  geoip:
+    database_path: data/GeoLite2-City.mmdb
   scoring:
     # Evidence – each term adds a bounded slice of points, and the three are summed.
     severity_points:

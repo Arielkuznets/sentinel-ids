@@ -25,7 +25,7 @@ class _FakeApp:
         pass
 
 
-def _drain_through_dedup(alerts: queue.Queue, session_factory, scorer, no_baseline) -> int:
+def _drain_through_dedup(alerts: queue.Queue, session_factory, scorer, no_baseline, no_geo) -> int:
     """Feed every queued alert through the dedup routing; return how many fired."""
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
@@ -36,11 +36,11 @@ def _drain_through_dedup(alerts: queue.Queue, session_factory, scorer, no_baseli
         except queue.Empty:
             break
         emitted += 1
-        _handle_alert(alert, session_factory, deduper, scorer, no_baseline, app)
+        _handle_alert(alert, session_factory, deduper, scorer, no_baseline, no_geo, app)
     return emitted
 
 
-def test_dns_tunnel_storm_collapses_to_one_row(session_factory, scorer, no_baseline):
+def test_dns_tunnel_storm_collapses_to_one_row(session_factory, scorer, no_baseline, no_geo):
     alerts   = queue.Queue()
     detector = DnsAnomalyDetector(queue.Queue(), alerts, subdomain_max_length=10)
 
@@ -51,7 +51,7 @@ def test_dns_tunnel_storm_collapses_to_one_row(session_factory, scorer, no_basel
             "timestamp": 1000.0 + i * 0.1,
         })
 
-    emitted = _drain_through_dedup(alerts, session_factory, scorer, no_baseline)
+    emitted = _drain_through_dedup(alerts, session_factory, scorer, no_baseline, no_geo)
     assert emitted == 100          # the per-qname cooldown never suppressed -> a storm
 
     rows = alerts_since(session_factory, seconds=3600, now=1010.0)
@@ -59,7 +59,7 @@ def test_dns_tunnel_storm_collapses_to_one_row(session_factory, scorer, no_basel
     assert rows[0].count == 100
 
 
-def test_arp_flip_flop_storm_collapses_to_one_row(session_factory, scorer, no_baseline):
+def test_arp_flip_flop_storm_collapses_to_one_row(session_factory, scorer, no_baseline, no_geo):
     alerts   = queue.Queue()
     detector = ArpSpoofDetector(queue.Queue(), alerts)
 
@@ -70,7 +70,7 @@ def test_arp_flip_flop_storm_collapses_to_one_row(session_factory, scorer, no_ba
         mac = "bb:bb:bb:bb:bb:bb" if i % 2 == 0 else "aa:aa:aa:aa:aa:aa"
         detector._process({**base, "src_mac": mac, "timestamp": 1000.0 + (i + 1) * 0.1})
 
-    emitted = _drain_through_dedup(alerts, session_factory, scorer, no_baseline)
+    emitted = _drain_through_dedup(alerts, session_factory, scorer, no_baseline, no_geo)
     assert emitted == 100          # ARP has no cooldown -> every flip fired
 
     rows = alerts_since(session_factory, seconds=3600, now=1011.0)

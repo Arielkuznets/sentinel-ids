@@ -23,6 +23,7 @@ SENTINEL captures every packet that travels through the network and analyzes it 
 - **Baseline anomaly detection** — a sixth detector learns each source IP's normal packet rate and flags a statistical spike (a z-score far past its *own* learned baseline), catching abnormal behaviour no fixed rule was written for. The learned baseline persists across restarts.
 - **Alert deduplication** — a storm of identical alerts collapses into a single entry with a live repeat counter, in both the terminal UI and the web dashboard.
 - **Threat scoring** — every alert carries a 0–100 score, so a HIGH from one detector can be ranked against a HIGH from another. It composes what the two features above already produce: how severe the detector called it, how often it has repeated (the dedup counter), and how far the source strays from its own learned baseline — then multiplies by a weight for the attack type, because an ARP spoof and a DNS oddity are not equally dangerous. The score **climbs while an attack is live**, since each repeat re-scores it.
+- **GeoIP** — an alert from a public address carries the country and city its source resolves to, shown in both interfaces. The lookup is local: a MaxMind GeoLite2 file, memory-mapped, so no query ever leaves the machine and an alert costs no network round-trip. It runs once per alert episode, not per packet — the source IP is part of the deduplication key, so an episode cannot change country.
 
 ---
 
@@ -72,10 +73,11 @@ sentinel/
 │   │   ├── sliding_window.py    # Time-bounded O(1) event counter + idle-window sweep
 │   │   ├── cooldown.py          # Per-key alert suppression (anti-storm)
 │   │   └── welford.py           # (Phase 11) online mean/variance for baselines
-│   ├── alerts/                  # Alert data + deduplication + scoring
+│   ├── alerts/                  # Alert data + deduplication + scoring + geo
 │   │   ├── alert.py             # The Alert dataclass passed on the queue
 │   │   ├── deduplicator.py      # (Phase 11) collapses repeat alerts into one + counter
-│   │   └── scoring.py           # (Phase 11) ThreatScorer – ranks an alert 0–100
+│   │   ├── scoring.py           # (Phase 11) ThreatScorer – ranks an alert 0–100
+│   │   └── geoip.py             # (Phase 11) GeoIPResolver – public IP → country/city
 │   └── response/                # Block/unblock actions (Phase 10)
 │       ├── engine.py            # Policy brain – confirm, whitelist, record to DB
 │       └── firewall.py          # Adds/removes Windows Firewall rules via netsh
@@ -98,13 +100,16 @@ sentinel/
 ├── config/
 │   └── config.yaml              # All tunable thresholds – no hardcoded values in code
 │
+├── data/                        # GeoLite2 database – downloaded by hand, not in the repo
+│
 ├── scripts/                     # Runnable demos (Scapy attack sims are Phase 12)
 │   ├── demo_baseline.py         # (Phase 11) watch the baseline fire in the TUI, no capture
-│   └── demo_scoring.py          # (Phase 11) watch a threat score climb live, no capture
+│   ├── demo_scoring.py          # (Phase 11) watch a threat score climb live, no capture
+│   └── demo_geoip.py            # (Phase 11) five sources, five different geo answers
 │
 ├── pcap_samples/                # Pre-recorded attack traffic for offline replay
 │
-├── tests/                       # 158 pytest tests – utils, parser, detectors, dedup, baseline, scoring, db, response
+├── tests/                       # 178 pytest tests – utils, parser, detectors, dedup, baseline, scoring, geoip, db, response
 │   └── conftest.py              # Shared fixtures (fresh per-test file DB, scorer from config)
 ├── docs/                        # (planned, Phase 13) ADRs, THREAT_MODEL.md, BENCHMARKS.md
 │
@@ -155,9 +160,9 @@ Running three virtual machines (Kali, Ubuntu, Windows) simultaneously is too res
 
 | Layer | Method |
 |-------|--------|
-| Unit tests | 158 `pytest` tests across the utils (including Welford), parser, all 6 detectors, alert deduplication, threat scoring, the DB layer, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~3s: `python -m pytest` |
+| Unit tests | 178 `pytest` tests across the utils (including Welford), parser, all 6 detectors, alert deduplication, threat scoring, geo resolution, the DB layer, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~3s: `python -m pytest`. The GeoIP tests drive a fake reader, so the suite is green on a clone that never downloaded the 63MB database |
 | Development | Replay pre-recorded PCAP files with `rdpcap()` – exact repeatability for debugging |
-| Demo & live | `scripts/demo_scoring.py` and `scripts/demo_baseline.py` feed synthetic traffic through the real pipeline into the TUI – watch a score climb, or the baseline fire, with no VMs and no Npcap. Scapy loopback attack scripts are planned for Phase 12 |
+| Demo & live | `scripts/demo_scoring.py`, `scripts/demo_baseline.py` and `scripts/demo_geoip.py` feed synthetic traffic through the real pipeline into the TUI – watch a score climb, the baseline fire, or five sources resolve to five different places, with no VMs and no Npcap. Scapy loopback attack scripts are planned for Phase 12 |
 
 ---
 
@@ -179,6 +184,8 @@ python -m pytest
 ```
 
 > Npcap must be installed for live capture. Download from https://npcap.com
+
+**Optional – GeoIP.** The GeoLite2 database is a 63MB binary and is not committed. Without it the system runs exactly as before, and alerts simply carry no location. To enable it, take the free `GeoLite2-City.mmdb` from [MaxMind](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) and drop it in `data/`; the path is `alerts.geoip.database_path` in `config/config.yaml`.
 
 ---
 
@@ -203,7 +210,7 @@ python -m pytest
 
 > ✅ **Test suite (v0.10.1) and audit round (v0.10.2):** after Phase 10 the project gained a committed suite of **88 `pytest` tests**, then a hardening round that fixed a SYN-flood alert-persistence crash, bounded detector memory against spoofed-source floods, made SYN-flood detection work under PCAP replay, and hardened the response layer (unblock symmetry, netsh timeout). Both shipped between Phase 10 and Phase 11.
 
-> 🟡 **Phase 11 in progress:** three of the advanced features are done and merged. **Alert deduplication** collapses a storm of identical alerts into one entry with a live repeat counter (closing two alert-storm bugs deferred from the audit). **Baseline learning** adds a sixth detector that learns each host's normal packet rate with an online Welford mean/variance and flags a z-score spike past its *own* baseline, with the learned state persisted across restarts. **Threat scoring** composes both into a 0–100 rank per alert — severity, repeat count and baseline deviation are summed as evidence, then multiplied by a weight for the attack type — so alerts of different types can be compared and a live attack's score climbs as it repeats. GeoIP and PCAP export remain.
+> 🟡 **Phase 11 in progress:** four of the advanced features are done and merged. **Alert deduplication** collapses a storm of identical alerts into one entry with a live repeat counter (closing two alert-storm bugs deferred from the audit). **Baseline learning** adds a sixth detector that learns each host's normal packet rate with an online Welford mean/variance and flags a z-score spike past its *own* baseline, with the learned state persisted across restarts. **Threat scoring** composes both into a 0–100 rank per alert — severity, repeat count and baseline deviation are summed as evidence, then multiplied by a weight for the attack type — so alerts of different types can be compared and a live attack's score climbs as it repeats. **GeoIP** resolves a public source to a country and city from a local MaxMind database, once per alert episode, and shows it in both interfaces. PCAP export remains.
 
 > 🟡 **Phase 5 is partial:** the `alerts` table is live (write + read), `blocked_ips` arrived with the Response Engine (Phase 10), and `baselines` arrived with Phase 11 baseline learning. The `packets` table, retention cleanup, and built-in stat queries are still deferred — each consumer pulls in what it needs, when it needs it, rather than creating empty tables up front.
 

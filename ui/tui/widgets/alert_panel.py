@@ -11,6 +11,21 @@ _SEVERITY_COLOR = {"HIGH": "red", "MEDIUM": "yellow", "LOW": "green"}
 _SCORE_COLOR    = {"high": "red", "medium": "yellow", "low": "green"}
 
 
+def format_location(geo: dict | None) -> str:
+    """A source's location, or nothing at all when it has none.
+
+    Unlike the deviation, an absent location says nothing worth a slot on the
+    line: on an internal network every source is private, and 'geo=n/a' on every
+    row would be pure noise. The iso code, not the country name, keeps a narrow
+    panel readable.
+    """
+    if not geo:
+        return ""
+    place = geo.get("iso") or geo.get("country")
+    city  = geo.get("city")
+    return f" ({place}/{city})" if city else f" ({place})"
+
+
 def format_alert_line(alert: Alert, count: int, score_high: int = 70,
                       score_medium: int = 40) -> str:
     """One alert as a line: score, severity, time, type, source, details, repeats.
@@ -26,11 +41,11 @@ def format_alert_line(alert: Alert, count: int, score_high: int = 70,
         f"[{score_color}][{alert.score:>3}][/{score_color}] "
         f"[{color}][{alert.severity:<6}][/{color}] "
         f"{ts}  [{color}]{alert.type:<14}[/{color}] "
-        f"src={alert.src_ip}"
+        f"src={alert.src_ip}[dim]{format_location(alert.details.get('geo'))}[/dim]"
     )
 
-    # deviation is rendered on its own below, so keep it out of the generic dump.
-    details = {k: v for k, v in alert.details.items() if k != "deviation"}
+    # deviation and geo are rendered on their own, so keep them out of the generic dump.
+    details = {k: v for k, v in alert.details.items() if k not in ("deviation", "geo")}
     if details:
         extra = "  ".join(f"{k}={v}" for k, v in list(details.items())[:2])
         line += f"  {extra}"

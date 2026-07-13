@@ -32,3 +32,9 @@ def scorer():
 def no_baseline():
     """A deviation source that has never measured anything."""
     return lambda src_ip, now: None
+
+
+@pytest.fixture
+def no_geo():
+    """A geo source with no GeoLite2 database behind it."""
+    return lambda ip: None

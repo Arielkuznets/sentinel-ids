@@ -31,6 +31,7 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.alerts.deduplicator import Deduplicator
+from core.alerts.geoip import GeoIPResolver
 from core.alerts.scoring import ThreatScorer
 from core.capture.queue import PacketQueue
 from core.detectors.arp_spoof import ArpSpoofDetector
@@ -122,9 +123,12 @@ def main() -> None:
         score_medium = config["ui"]["score_medium"],
     )
 
+    geoip = GeoIPResolver.from_path(config["alerts"]["geoip"]["database_path"])
+
     threading.Thread(
         target=_alert_loop,
-        args=(alert_queue, session_factory, deduper, scorer, baseline.deviation_for, app),
+        args=(alert_queue, session_factory, deduper, scorer, baseline.deviation_for,
+              geoip.lookup, app),
         daemon=True,
     ).start()
     baseline.start()
