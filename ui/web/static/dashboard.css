@@ -100,7 +100,7 @@ body {
 
 .alert-item {
     display: grid;
-    grid-template-columns: auto auto auto 1fr auto auto;
+    grid-template-columns: auto auto auto auto 1fr auto auto;
     gap: 12px;
     align-items: center;
     padding: 8px 12px;
@@ -118,6 +118,7 @@ body {
 .alert-time  { color: var(--text-dim); }
 .alert-type  { font-weight: 700; }
 .alert-ip    { color: var(--text-dim); }
+.alert-geo   { color: var(--text-dim); font-size: 13px; }
 .alert-sev   { font-weight: 700; text-align: right; }
 .alert-count { color: var(--accent); font-weight: 700; text-align: right; }
 .alert-score { font-weight: 700; text-align: right; min-width: 3ch; }

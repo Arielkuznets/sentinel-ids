@@ -33,3 +33,12 @@ def test_message_carries_the_band_the_server_resolved():
 def test_the_band_follows_the_configured_thresholds_not_a_hardcoded_70():
     # Same score, thresholds lowered: the band has to move with the config.
     assert _alert_to_message(_record(63), score_high=60, score_medium=30)["score_level"] == "high"
+
+
+def test_message_carries_the_source_location():
+    record = _record(63)
+    record.details = {"deviation": 3.5, "geo": {"country": "Russia", "iso": "RU", "city": "Moscow"}}
+
+    msg = _alert_to_message(record, score_high=70, score_medium=40)
+
+    assert msg["details"]["geo"] == {"country": "Russia", "iso": "RU", "city": "Moscow"}

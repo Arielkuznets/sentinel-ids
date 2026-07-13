@@ -56,6 +56,19 @@ function countText(count) {
     return count > 1 ? `×${count}` : "";   // a first sighting shows no multiplier
 }
 
+function flagOf(iso) {
+    // the two letters shifted into the regional-indicator block: "US" -> 🇺🇸
+    if (!iso || iso.length !== 2) return "";
+    const base = 0x1f1e6 - "A".charCodeAt(0);
+    return String.fromCodePoint(...[...iso.toUpperCase()].map(c => c.charCodeAt(0) + base));
+}
+
+function locationText(geo) {
+    if (!geo) return "";
+    const place = `${flagOf(geo.iso)} ${geo.country}`.trim();
+    return geo.city ? `${place} · ${geo.city}` : place;
+}
+
 function paintScore(el, msg) {
     el.textContent = msg.score;
     el.dataset.level = msg.score_level;   // the band the server resolved; drives the colour
@@ -82,6 +95,7 @@ function renderAlert(msg) {
         cell("alert-time", formatTime(msg.timestamp)),
         cell("alert-type", msg.type),
         cell("alert-ip", msg.src_ip),
+        cell("alert-geo", locationText(msg.details && msg.details.geo)),
         cell("alert-sev", msg.severity),
         cell("alert-count", countText(msg.count)),
     );
