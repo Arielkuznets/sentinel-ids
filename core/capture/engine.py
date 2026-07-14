@@ -1,22 +1,31 @@
 import threading
+import time
+
 from scapy.sendrecv import sniff
 from scapy.utils import rdpcap
 
 from core.capture.parser import PacketParser
 from core.capture.queue import PacketQueue
+from core.capture.ring import PacketRing
 
 
 class PacketCapture:
     """
     Manages the lifecycle of the packet sniffing process.
-    Operates on a dedicated daemon thread to ensure non-blocking 
+    Operates on a dedicated daemon thread to ensure non-blocking
     packet ingestion for the rest of the application.
+
+    The ring, when present, is fed the raw packet here - the last point in the
+    pipeline where one exists, since the parser flattens it into a dict of fields
+    from which no .pcap can be written.
     """
 
-    def __init__(self, interface: str, parser: PacketParser, queue: PacketQueue):
+    def __init__(self, interface: str, parser: PacketParser, queue: PacketQueue,
+                 ring: PacketRing | None = None):
         self._interface = interface
         self._parser = parser
         self._queue = queue
+        self._ring = ring
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -63,4 +72,6 @@ class PacketCapture:
 
     def _handle_packet(self, raw_packet) -> None:
         # parse() always returns a dict - no None to guard against.
+        if self._ring is not None:
+            self._ring.add(float(getattr(raw_packet, "time", time.time())), raw_packet)
         self._queue.put(self._parser.parse(raw_packet))

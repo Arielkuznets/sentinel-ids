@@ -10,6 +10,7 @@ from core.alerts.scoring import ThreatScorer
 from core.capture.engine import PacketCapture
 from core.capture.parser import PacketParser
 from core.capture.queue import PacketQueue
+from core.capture.ring import PacketRing
 from core.detectors.baseline import BaselineDetector
 from core.detectors.arp_spoof import ArpSpoofDetector
 from core.detectors.brute_force import BruteForceDetector
@@ -99,8 +100,12 @@ def main() -> None:
     scorer      = ThreatScorer(**config["alerts"]["scoring"])
     geoip       = GeoIPResolver.from_path(config["alerts"]["geoip"]["database_path"])
 
+    pcap_cfg    = config["alerts"]["pcap"]
+    ring        = PacketRing(window_seconds = pcap_cfg["buffer_seconds"],
+                             max_packets    = pcap_cfg["max_packets"])
+
     consumer    = pkt_queue.subscribe()
-    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue)
+    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring)
     ps_cfg      = config["detectors"]["port_scan"]
     ps_detector = PortScanDetector(
         pkt_queue.subscribe(),
