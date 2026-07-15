@@ -44,14 +44,19 @@ def format_alert_line(alert: Alert, count: int, score_high: int = 70,
         f"src={alert.src_ip}[dim]{format_location(alert.details.get('geo'))}[/dim]"
     )
 
-    # deviation and geo are rendered on their own, so keep them out of the generic dump.
-    details = {k: v for k, v in alert.details.items() if k not in ("deviation", "geo")}
+    # deviation, geo and pcap are rendered on their own, so keep them out of the dump.
+    details = {k: v for k, v in alert.details.items() if k not in ("deviation", "geo", "pcap")}
     if details:
         extra = "  ".join(f"{k}={v}" for k, v in list(details.items())[:2])
         line += f"  {extra}"
 
     deviation = alert.details.get("deviation")
     line += "  z=n/a" if deviation is None else f"  z={deviation}"
+
+    # A marker, not the path: the file is 45 chars and nobody reads it off a
+    # narrow panel - the dashboard names it, this only says one exists.
+    if alert.details.get("pcap"):
+        line += "  [dim]pcap✓[/dim]"
 
     if count > 1:
         line += f"  [bold]×{count}[/bold]"

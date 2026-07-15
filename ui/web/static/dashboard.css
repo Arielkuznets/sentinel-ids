@@ -100,7 +100,7 @@ body {
 
 .alert-item {
     display: grid;
-    grid-template-columns: auto auto auto auto 1fr auto auto;
+    grid-template-columns: auto auto auto auto auto auto auto minmax(0, 1fr);
     gap: 12px;
     align-items: center;
     padding: 8px 12px;
@@ -122,6 +122,8 @@ body {
 .alert-sev   { font-weight: 700; text-align: right; }
 .alert-count { color: var(--accent); font-weight: 700; text-align: right; }
 .alert-score { font-weight: 700; text-align: right; min-width: 3ch; }
+.alert-pcap  { color: var(--text-dim); font-size: 12px; text-align: right;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .alert-item[data-severity="HIGH"]   .alert-sev { color: var(--high); }
 .alert-item[data-severity="MEDIUM"] .alert-sev { color: var(--medium); }

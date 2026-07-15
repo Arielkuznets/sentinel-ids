@@ -42,3 +42,12 @@ def test_message_carries_the_source_location():
     msg = _alert_to_message(record, score_high=70, score_medium=40)
 
     assert msg["details"]["geo"] == {"country": "Russia", "iso": "RU", "city": "Moscow"}
+
+
+def test_message_carries_the_pcap_path():
+    record = _record(63)
+    record.details = {"deviation": 3.5, "pcap": "captures/20260715_x_PORT_SCAN_5.255.255.70.pcap"}
+
+    msg = _alert_to_message(record, score_high=70, score_medium=40)
+
+    assert msg["details"]["pcap"] == "captures/20260715_x_PORT_SCAN_5.255.255.70.pcap"
