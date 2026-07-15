@@ -154,7 +154,7 @@ class _FakeApp:
         pass
 
 
-def test_baseline_anomaly_reaches_the_database(session_factory, scorer, no_geo):
+def test_baseline_anomaly_reaches_the_database(session_factory, scorer, no_geo, no_pcap):
     alerts = queue.Queue()
     det = _detector(alerts)
     _feed(det, "10.0.0.5", [10, 11, 9, 10, 50])   # learn a baseline, then a spike
@@ -164,7 +164,7 @@ def test_baseline_anomaly_reaches_the_database(session_factory, scorer, no_geo):
     while True:
         try:
             _handle_alert(alerts.get_nowait(), session_factory, deduper,
-                          scorer, det.deviation_for, no_geo, app)
+                          scorer, det.deviation_for, no_geo, no_pcap, app)
         except queue.Empty:
             break
 

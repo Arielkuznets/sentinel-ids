@@ -31,11 +31,11 @@ def _alert(t, src="1.1.1.1", atype="DNS_ANOMALY", sev="HIGH"):
     return Alert(type=atype, severity=sev, src_ip=src, timestamp=t)
 
 
-def test_new_alert_is_persisted_and_pushed(session_factory, scorer, no_baseline, no_geo):
+def test_new_alert_is_persisted_and_pushed(session_factory, scorer, no_baseline, no_geo, no_pcap):
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
 
-    _handle_alert(_alert(1000.0), session_factory, deduper, scorer, no_baseline, no_geo, app)
+    _handle_alert(_alert(1000.0), session_factory, deduper, scorer, no_baseline, no_geo, no_pcap, app)
 
     rows = alerts_since(session_factory, seconds=3600, now=1000.0)
     assert len(rows) == 1
@@ -43,13 +43,13 @@ def test_new_alert_is_persisted_and_pushed(session_factory, scorer, no_baseline,
     assert len(app.pushed) == 1
 
 
-def test_storm_collapses_to_one_row_and_one_push(session_factory, scorer, no_baseline, no_geo):
+def test_storm_collapses_to_one_row_and_one_push(session_factory, scorer, no_baseline, no_geo, no_pcap):
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
 
     for i in range(500):   # a DNS-tunnel storm: 500 identical alerts in the window
         _handle_alert(_alert(1000.0 + i * 0.01), session_factory, deduper,
-                      scorer, no_baseline, no_geo, app)
+                      scorer, no_baseline, no_geo, no_pcap, app)
 
     rows = alerts_since(session_factory, seconds=3600, now=1010.0)
     assert len(rows) == 1                       # one row, not 500
@@ -60,60 +60,60 @@ def test_storm_collapses_to_one_row_and_one_push(session_factory, scorer, no_bas
     assert app.counts[-1][1] == 500             # the last bump carries the final total
 
 
-def test_new_episode_after_window_makes_a_second_row(session_factory, scorer, no_baseline, no_geo):
+def test_new_episode_after_window_makes_a_second_row(session_factory, scorer, no_baseline, no_geo, no_pcap):
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
 
-    _handle_alert(_alert(1000.0), session_factory, deduper, scorer, no_baseline, no_geo, app)
-    _handle_alert(_alert(1100.0), session_factory, deduper, scorer, no_baseline, no_geo, app)
+    _handle_alert(_alert(1000.0), session_factory, deduper, scorer, no_baseline, no_geo, no_pcap, app)
+    _handle_alert(_alert(1100.0), session_factory, deduper, scorer, no_baseline, no_geo, no_pcap, app)
 
     rows = alerts_since(session_factory, seconds=3600, now=1100.0)
     assert len(rows) == 2
     assert len(app.pushed) == 2
 
 
-def test_a_scored_alert_reaches_the_database(session_factory, scorer, no_baseline, no_geo):
+def test_a_scored_alert_reaches_the_database(session_factory, scorer, no_baseline, no_geo, no_pcap):
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
 
     _handle_alert(_alert(1000.0, atype="ARP_SPOOF"), session_factory, deduper,
-                  scorer, no_baseline, no_geo, app)
+                  scorer, no_baseline, no_geo, no_pcap, app)
 
     rows = alerts_since(session_factory, seconds=3600, now=1000.0)
     assert rows[0].score == 63                     # HIGH, no repeats, no baseline
     assert rows[0].details["deviation"] is None    # never measured, and it shows
 
 
-def test_a_repeat_rescores_higher_than_the_first_sighting(session_factory, scorer, no_baseline, no_geo):
+def test_a_repeat_rescores_higher_than_the_first_sighting(session_factory, scorer, no_baseline, no_geo, no_pcap):
     # The count feeds the score, so an attack that keeps firing keeps climbing.
     app     = _FakeApp()
     deduper = Deduplicator(window_seconds=60)
 
     _handle_alert(_alert(1000.0, atype="ARP_SPOOF"), session_factory, deduper,
-                  scorer, no_baseline, no_geo, app)
+                  scorer, no_baseline, no_geo, no_pcap, app)
     first = alerts_since(session_factory, seconds=3600, now=1000.0)[0].score
 
     for i in range(1, 20):
         _handle_alert(_alert(1000.0 + i, atype="ARP_SPOOF"), session_factory, deduper,
-                      scorer, no_baseline, no_geo, app)
+                      scorer, no_baseline, no_geo, no_pcap, app)
 
     row = alerts_since(session_factory, seconds=3600, now=1030.0)[0]
     assert row.count == 20
     assert row.score > first        # the stored score climbed with the count
 
 
-def test_the_source_location_is_stored_with_the_alert(session_factory, scorer, no_baseline):
+def test_the_source_location_is_stored_with_the_alert(session_factory, scorer, no_baseline, no_pcap):
     app = _FakeApp()
     tel_aviv = lambda ip: {"country": "Israel", "city": "Tel Aviv"}
 
     _handle_alert(_alert(1000.0, src="8.8.8.8"), session_factory,
-                  Deduplicator(window_seconds=60), scorer, no_baseline, tel_aviv, app)
+                  Deduplicator(window_seconds=60), scorer, no_baseline, tel_aviv, no_pcap, app)
 
     row = alerts_since(session_factory, seconds=3600, now=1000.0)[0]
     assert row.details["geo"] == {"country": "Israel", "city": "Tel Aviv"}
 
 
-def test_a_repeat_keeps_the_location_of_the_episode(session_factory, scorer, no_baseline):
+def test_a_repeat_keeps_the_location_of_the_episode(session_factory, scorer, no_baseline, no_pcap):
     # A repeat rewrites the score and the deviation on the row. The location must
     # survive that rewrite: it is looked up once, when the episode opens.
     app      = _FakeApp()
@@ -122,14 +122,40 @@ def test_a_repeat_keeps_the_location_of_the_episode(session_factory, scorer, no_
 
     for i in range(5):
         _handle_alert(_alert(1000.0 + i, src="8.8.8.8"), session_factory, deduper,
-                      scorer, no_baseline, tel_aviv, app)
+                      scorer, no_baseline, tel_aviv, no_pcap, app)
 
     row = alerts_since(session_factory, seconds=3600, now=1005.0)[0]
     assert row.count == 5
     assert row.details["geo"] == {"country": "Israel", "city": "Tel Aviv"}
 
 
-def test_a_deviating_source_scores_above_a_normal_one(session_factory, scorer, no_geo):
+def test_the_captured_pcap_path_is_stored_with_the_alert(session_factory, scorer, no_baseline, no_geo):
+    app     = _FakeApp()
+    capture = lambda alert: "captures/evidence.pcap"
+
+    _handle_alert(_alert(1000.0), session_factory, Deduplicator(window_seconds=60),
+                  scorer, no_baseline, no_geo, capture, app)
+
+    row = alerts_since(session_factory, seconds=3600, now=1000.0)[0]
+    assert row.details["pcap"] == "captures/evidence.pcap"
+
+
+def test_a_repeat_does_not_capture_a_second_pcap(session_factory, scorer, no_baseline, no_geo):
+    # The ring is written once, when the episode opens - a storm must not spray one
+    # file per repeat. Only the new branch calls the exporter.
+    app     = _FakeApp()
+    deduper = Deduplicator(window_seconds=60)
+    calls   = []
+    capture = lambda alert: calls.append(alert.timestamp) or "captures/evidence.pcap"
+
+    for i in range(5):
+        _handle_alert(_alert(1000.0 + i, atype="ARP_SPOOF"), session_factory, deduper,
+                      scorer, no_baseline, no_geo, capture, app)
+
+    assert calls == [1000.0]
+
+
+def test_a_deviating_source_scores_above_a_normal_one(session_factory, scorer, no_geo, no_pcap):
     # Same alert, same count - only the source's deviation from its own baseline
     # differs. This is the whole point of asking the baseline at all.
     app     = _FakeApp()
@@ -137,9 +163,9 @@ def test_a_deviating_source_scores_above_a_normal_one(session_factory, scorer, n
     normal  = lambda src_ip, now: 0.0
 
     _handle_alert(_alert(1000.0, src="1.1.1.1"), session_factory,
-                  Deduplicator(window_seconds=60), scorer, spiking, no_geo, app)
+                  Deduplicator(window_seconds=60), scorer, spiking, no_geo, no_pcap, app)
     _handle_alert(_alert(1000.0, src="2.2.2.2"), session_factory,
-                  Deduplicator(window_seconds=60), scorer, normal, no_geo, app)
+                  Deduplicator(window_seconds=60), scorer, normal, no_geo, no_pcap, app)
 
     by_ip = {row.src_ip: row for row in alerts_since(session_factory, seconds=3600, now=1000.0)}
     assert by_ip["1.1.1.1"].score > by_ip["2.2.2.2"].score

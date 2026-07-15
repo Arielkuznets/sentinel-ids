@@ -38,3 +38,9 @@ def no_baseline():
 def no_geo():
     """A geo source with no GeoLite2 database behind it."""
     return lambda ip: None
+
+
+@pytest.fixture
+def no_pcap():
+    """A capture export that never has any traffic to write."""
+    return lambda alert: None
