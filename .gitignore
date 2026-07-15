@@ -51,6 +51,9 @@ config/local.yaml
 # GeoIP database (large binary)
 *.mmdb
 
+# Captured evidence – raw traffic, written at runtime
+captures/
+
 # Claude Code session instructions – local only, never publish
 CLAUDE.md
 .claude/
