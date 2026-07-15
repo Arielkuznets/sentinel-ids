@@ -14,25 +14,27 @@ class PacketRing:
     maxlen evicts the oldest packet in O(1) once the ceiling is reached.
 
     The capture thread writes and the alert thread reads, so every access is
-    locked. The ring stores packets and does not read them - filtering by address
-    belongs to whoever writes the file.
+    locked. Each packet is stored beside the addresses the parser already pulled
+    from it, so packets_for can select a source's traffic by string match without
+    the ring ever reopening a packet - the one place that knows where an address
+    lives (psrc for ARP, src for IP) stays the parser.
     """
 
     def __init__(self, window_seconds: float, max_packets: int):
         self._window = window_seconds
-        self._packets: deque[tuple[float, object]] = deque(maxlen=max_packets)
+        self._packets: deque[tuple[float, str | None, str | None, object]] = deque(maxlen=max_packets)
         self._lock = threading.Lock()
 
-    def add(self, timestamp: float, packet) -> None:
+    def add(self, timestamp: float, src_ip: str | None, dst_ip: str | None, packet) -> None:
         with self._lock:
-            self._packets.append((timestamp, packet))
+            self._packets.append((timestamp, src_ip, dst_ip, packet))
             self._prune(timestamp)
 
-    def snapshot(self, now: float) -> list[tuple[float, object]]:
-        """The packets still inside the window at `now`, oldest first."""
+    def packets_for(self, ip: str, now: float) -> list:
+        """Every packet still in the window that `ip` sent or received, oldest first."""
         with self._lock:
             self._prune(now)
-            return list(self._packets)
+            return [pkt for _, src, dst, pkt in self._packets if ip in (src, dst)]
 
     def __len__(self) -> int:
         with self._lock:

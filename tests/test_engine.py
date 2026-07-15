@@ -3,6 +3,8 @@
 Packets are pushed straight into _handle_packet, so no NIC, no Npcap and no
 admin rights are involved - the same shape as the detector tests.
 """
+import time
+
 from scapy.layers.inet import IP, TCP
 
 from core.capture.engine import PacketCapture
@@ -19,13 +21,15 @@ def _syn(src="1.2.3.4", port=80):
     return IP(src=src, dst="10.0.0.9") / TCP(dport=port, flags="S")
 
 
-def test_the_raw_packet_reaches_the_ring():
+def test_the_raw_packet_reaches_the_ring_selectable_by_address():
     # The ring has to be fed here: one step later the parser has flattened the
-    # packet into a dict, and no .pcap can be written from that.
+    # packet into a dict, and no .pcap can be written from that. The engine also
+    # hands over the addresses the parser found, so the ring can select by them.
     ring = PacketRing(window_seconds=30, max_packets=100)
-    _capture(ring)._handle_packet(_syn())
+    _capture(ring)._handle_packet(_syn(src="4.3.2.1"))
 
-    assert len(ring) == 1
+    assert ring.packets_for("4.3.2.1", time.time()) != []
+    assert ring.packets_for("9.9.9.9", time.time()) == []
 
 
 def test_detectors_still_receive_the_parsed_packet():

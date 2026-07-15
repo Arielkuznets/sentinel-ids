@@ -1,5 +1,4 @@
 import threading
-import time
 
 from scapy.sendrecv import sniff
 from scapy.utils import rdpcap
@@ -72,6 +71,7 @@ class PacketCapture:
 
     def _handle_packet(self, raw_packet) -> None:
         # parse() always returns a dict - no None to guard against.
+        parsed = self._parser.parse(raw_packet)
         if self._ring is not None:
-            self._ring.add(float(getattr(raw_packet, "time", time.time())), raw_packet)
-        self._queue.put(self._parser.parse(raw_packet))
+            self._ring.add(parsed["timestamp"], parsed["src_ip"], parsed["dst_ip"], raw_packet)
+        self._queue.put(parsed)
