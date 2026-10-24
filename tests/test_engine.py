@@ -134,3 +134,26 @@ def test_the_capture_counts_every_packet_it_hands_on():
         capture._handle_packet(_syn(port=port))
 
     assert capture.packets_seen == 5
+
+
+class _BrokenParser(PacketParser):
+    """Fails on one destination port, the way a malformed packet can fail in Scapy."""
+
+    def parse(self, packet):
+        if packet[TCP].dport == 666:
+            raise ValueError("cannot read this one")
+        return super().parse(packet)
+
+
+def test_a_packet_the_parser_cannot_read_costs_only_that_packet():
+    # Scapy's sniffer closes its socket when the callback raises: before this guard,
+    # one crafted packet ended live capture for good, and nothing said so.
+    capture  = PacketCapture(interface=None, parser=_BrokenParser(), queue=PacketQueue())
+    consumer = capture._queue.subscribe()
+
+    for port in (80, 666, 443):
+        capture._handle_packet(_syn(port=port))      # must not raise
+
+    assert [p["dst_port"] for p in _drain(consumer)] == [80, 443]
+    assert capture.packets_unreadable == 1
+    assert capture.packets_seen == 3
