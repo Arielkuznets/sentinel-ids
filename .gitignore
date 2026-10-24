@@ -40,6 +40,8 @@ desktop.ini
 
 # Project-specific
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 pcap_samples/*.pcap
