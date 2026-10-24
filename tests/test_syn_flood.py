@@ -128,3 +128,34 @@ def test_non_tcp_and_missing_fields_ignored():
     detector._evaluate_all(now=1000.0)
 
     assert alerts.empty()
+
+
+def test_a_flood_judged_early_in_its_ramp_still_escalates_to_high():
+    # Other TCP traffic decides where a judgement lands. Judged early, a flood
+    # reads MEDIUM; the next judgement must still be free to say HIGH, rather
+    # than the MEDIUM's cooldown holding the target down for a whole minute.
+    alerts = queue.Queue()
+    detector = SynFloodDetector(queue.Queue(), alerts, ratio_medium=10, ratio_high=50,
+                                min_syn=20, window_seconds=5, cooldown_seconds=60)
+
+    for i in range(30):
+        detector._process(make_tcp("S", timestamp=1000.0 + i * 0.05))
+    detector._evaluate_all(now=1001.5)          # 30 SYNs so far: MEDIUM
+    for i in range(70):
+        detector._process(make_tcp("S", timestamp=1001.5 + i * 0.05))
+    detector._evaluate_all(now=1005.0)          # 100 SYNs in the window: HIGH
+
+    assert [alerts.get_nowait().severity for _ in range(alerts.qsize())] == ["MEDIUM", "HIGH"]
+
+
+def test_the_same_severity_stays_quiet_through_the_cooldown():
+    alerts = queue.Queue()
+    detector = SynFloodDetector(queue.Queue(), alerts, ratio_medium=10, ratio_high=50,
+                                min_syn=20, window_seconds=5, cooldown_seconds=60)
+
+    for second in range(10):                    # ten seconds of a steady HIGH flood
+        for i in range(60):
+            detector._process(make_tcp("S", timestamp=1000.0 + second + i / 60))
+        detector._evaluate_all(now=1001.0 + second)
+
+    assert alerts.qsize() == 1                  # one HIGH; the rest cooled down

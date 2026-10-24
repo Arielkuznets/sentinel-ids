@@ -2,6 +2,12 @@
 
 A real-time network intrusion detection system (IDS) that runs on Windows, listens to live network traffic, detects 5 types of cyber attacks, learns each host's normal traffic to flag statistical anomalies, and presents everything through a dual tactical interface — a terminal UI and a web dashboard.
 
+![The terminal UI replaying every attack in the reference capture](docs/screenshots/demo.gif)
+
+![The web dashboard: incident log, traffic, attack mix and top talkers](docs/screenshots/dashboard.png)
+
+*The terminal UI is `python main.py --replay pcap_samples/all_attacks.pcap --speed 4`, exactly as [DEMO.md](DEMO.md) describes it. The dashboard shows the same attacks replayed over synthetic background traffic, shifted to the present so its charts have data – there the SYN flood is judged once early in its ramp (MEDIUM) and escalates a window later (HIGH). Every address in both is a lab address.*
+
 ---
 
 ## What It Does
@@ -32,25 +38,24 @@ The same pipeline can replay a capture file instead of the live interface (`pyth
 
 ## Architecture Overview
 
-```
-[Network Interface  or  PCAP File via --replay]
-            ↓
-    [Packet Capture Engine]        core/capture/engine.py
-            ↓          ↘
-            ↓           [Packet Ring]   core/capture/ring.py  (last 30s, raw – read by PCAP export)
-       [Packet Parser]             core/capture/parser.py   (IPv4 + IPv6)
-            ↓
-    [Thread-Safe Fan-Out Queue]    core/capture/queue.py
-     ↓    ↓    ↓    ↓    ↓    ↓        ↘
- [Port][ARP][BF][DNS][SYN][Base]      [Packet Recorder → packets table]  core/capture/recorder.py
-     ↓    ↓    ↓    ↓    ↓    ↓        (Base = baseline anomaly, core/detectors/)
-  [Alert Loop: Dedup → Score → Geo → PCAP]   core/alerts/ + main.py
-         ↓           ↓
-   [Terminal UI]  [Web Dashboard]  ui/tui/  ui/web/
-         ↓
-  [Response Engine]                core/response/
-         ↓
-   [SQLite Database]               db/
+```mermaid
+flowchart TD
+    NIC["Network interface<br/>(Npcap)"] --> CAP
+    FILE["Capture file<br/>(--replay)"] --> CAP
+    CAP["Capture engine<br/>core/capture/engine.py"] --> PARSE["Parser – IPv4 and IPv6<br/>core/capture/parser.py"]
+    CAP -. raw packets .-> RING["Packet ring – last 30 s<br/>core/capture/ring.py"]
+    PARSE --> QUEUE["Fan-out queue<br/>core/capture/queue.py"]
+    QUEUE --> DET["Six detectors<br/>port scan · ARP · brute force<br/>DNS · SYN flood · baseline"]
+    QUEUE --> REC["Packet recorder<br/>core/capture/recorder.py"]
+    QUEUE --> TUI
+    DET --> LOOP["Alert loop<br/>dedup → score → GeoIP → PCAP export"]
+    RING -. evidence .-> LOOP
+    LOOP --> DB[("SQLite in WAL mode<br/>db/")]
+    REC --> DB
+    LOOP --> TUI["Terminal UI<br/>ui/tui/"]
+    TUI -- "b / u" --> RESP["Response engine<br/>Windows Firewall"]
+    RESP --> DB
+    DB --> WEB["Web dashboard – read-only<br/>ui/web/"]
 ```
 
 Each component has one responsibility and does not know about the others. The capture engine does not know detectors exist. The detectors do not know about the UI. This design is called **Separation of Concerns** and makes each part independently testable and replaceable.
@@ -118,6 +123,7 @@ sentinel/
 │   ├── sim_dns_tunnel.py
 │   ├── sim_syn_flood.py
 │   ├── make_samples.py          # (Phase 12) builds the reference captures in pcap_samples/
+│   ├── benchmark.py             # (Phase 13) times every stage of the pipeline – see docs/BENCHMARKS.md
 │   ├── demo_baseline.py         # (Phase 11) watch the baseline fire in the TUI, no capture
 │   ├── demo_scoring.py          # (Phase 11) watch a threat score climb live, no capture
 │   ├── demo_geoip.py            # (Phase 11) five sources, five different geo answers
@@ -125,15 +131,21 @@ sentinel/
 │
 ├── pcap_samples/                # Reference captures for --replay, built by make_samples.py – not in the repo
 │
-├── tests/                       # 256 pytest tests – parser to dashboard, plus every reference capture replayed
+├── tests/                       # 259 pytest tests – parser to dashboard, plus every reference capture replayed
 │   └── conftest.py              # Shared fixtures (fresh per-test file DB, scorer from config)
-├── docs/                        # (planned, Phase 13) ADRs, THREAT_MODEL.md, BENCHMARKS.md
+├── docs/                        # (Phase 13)
+│   ├── adr/                     # Architecture decision records, one per decision
+│   ├── THREAT_MODEL.md          # What the sensor sees, detects, misses – and how it defends itself
+│   ├── BENCHMARKS.md            # Measured cost of every stage, and the memory bounds
+│   └── screenshots/             # demo.gif (the replay above), dashboard.png
 │
 ├── main.py                      # Entry point – starts the full system
 ├── requirements.txt             # Runtime dependencies
 ├── requirements-dev.txt         # Test-only dependencies (pytest, httpx2 for FastAPI's TestClient)
 ├── pytest.ini                   # Test config (pythonpath + testpaths)
-└── DEMO.md                      # (Phase 12) Step-by-step demo scenarios
+├── DEMO.md                      # (Phase 12) Step-by-step demo scenarios
+├── CHANGELOG.md                 # Every release, newest first
+└── CONTRIBUTING.md              # Setup, the rules the codebase keeps, tests, git
 ```
 
 ---
@@ -154,6 +166,8 @@ sentinel/
 ---
 
 ## Key Design Decisions
+
+The short answers below; each decision is recorded in full – context, the alternatives weighed, the consequences – in [`docs/adr/`](docs/adr/).
 
 **Why Scapy and not PyShark or a simpler library?**
 Scapy gives direct access to every byte of every packet. We parse IP headers, TCP flags, and DNS payloads ourselves.
@@ -182,7 +196,7 @@ It is a read-only process on purpose. A localhost endpoint that adds firewall ru
 
 | Layer | Method |
 |-------|--------|
-| Unit tests | 256 `pytest` tests across the utils (including Welford), the parser (IPv4 and IPv6), all 6 detectors, alert deduplication, threat scoring, geo resolution, the packet ring and PCAP export, the packet log, the DB layer and its statistics, the dashboard's endpoints, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~4s: `python -m pytest`. The GeoIP tests drive a fake reader, so the suite is green on a clone that never downloaded the 63MB database; the PCAP tests write real packets and read the file back with `rdpcap`, as Wireshark would |
+| Unit tests | 259 `pytest` tests across the utils (including Welford), the parser (IPv4 and IPv6), all 6 detectors, alert deduplication, threat scoring, geo resolution, the packet ring and PCAP export, the packet log, the DB layer and its statistics, the dashboard's endpoints, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~4s: `python -m pytest`. The GeoIP tests drive a fake reader, so the suite is green on a clone that never downloaded the 63MB database; the PCAP tests write real packets and read the file back with `rdpcap`, as Wireshark would |
 | Scenarios | `tests/test_samples.py` builds every reference capture and replays it through the six detectors configured from the real `config.yaml`, asserting exactly the alerts each one is built for – a threshold change that silenced a demo fails the suite first |
 | Demo & live | `python main.py --replay pcap_samples/<file>` plays a capture through the full system; `scripts/demo_*.py` feed synthetic traffic into the TUI to show one Phase 11 feature each; `scripts/sim_*.py` send each attack on the real interface beside a live `python main.py`. [DEMO.md](DEMO.md) has the expected alerts for every one |
 
@@ -217,6 +231,19 @@ python -m pytest
 
 ---
 
+## Documentation
+
+| Document | What it answers |
+|----------|-----------------|
+| [DEMO.md](DEMO.md) | How to show every detection, with the exact alerts each scenario raises |
+| [docs/adr/](docs/adr/) | Why each major design choice was made, and what it cost |
+| [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) | What SENTINEL can see, what it detects and misses, and how it protects itself |
+| [docs/BENCHMARKS.md](docs/BENCHMARKS.md) | Where the time goes per packet, and how much memory each bound costs |
+| [CHANGELOG.md](CHANGELOG.md) | What every release added and fixed |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to set up, test and extend it |
+
+---
+
 ## Project Status
 
 | Phase | Description | Status |
@@ -234,11 +261,13 @@ python -m pytest
 | 10 | Response engine | ✅ Done – v0.10.0 |
 | 11 | Advanced features | ✅ Done – v0.11.0 |
 | 12 | Demo scenarios | ✅ Done – v0.12.0 |
-| 13 | Portfolio polish | ⬜ Pending |
+| 13 | Portfolio polish | ✅ Done – v1.0.0 |
 
 > ✅ **Test suite (v0.10.1) and audit round (v0.10.2):** after Phase 10 the project gained a committed suite of **88 `pytest` tests**, then a hardening round that fixed a SYN-flood alert-persistence crash, bounded detector memory against spoofed-source floods, made SYN-flood detection work under PCAP replay, and hardened the response layer (unblock symmetry, netsh timeout). Both shipped between Phase 10 and Phase 11.
 
 > ✅ **Phase 11 (v0.11.0):** all five advanced features are done. **Alert deduplication** collapses a storm of identical alerts into one entry with a live repeat counter (closing two alert-storm bugs deferred from the audit). **Baseline learning** adds a sixth detector that learns each host's normal packet rate with an online Welford mean/variance and flags a z-score spike past its *own* baseline, with the learned state persisted across restarts. **Threat scoring** composes both into a 0–100 rank per alert — severity, repeat count and baseline deviation are summed as evidence, then multiplied by a weight for the attack type — so alerts of different types can be compared and a live attack's score climbs as it repeats. **GeoIP** resolves a public source to a country and city from a local MaxMind database, once per alert episode, and shows it in both interfaces. **PCAP export** keeps the last 30 seconds of raw packets in a bounded ring and, when an episode opens, writes the source's traffic to a `.pcap` – the evidence behind the alert, ready for Wireshark.
+
+> ✅ **Phase 13 (v1.0.0):** architecture decision records, a threat model, measured benchmarks, a changelog, contribution notes, a demo GIF, screenshots and this diagram. The last checks turned up two more fixes: writing the threat model showed that a packet the parser could not read ended live capture silently – Scapy's sniffer closes its socket when the callback raises – and replaying over background traffic showed a SYN flood judged early in its ramp held at MEDIUM by a per-target cooldown.
 
 > ✅ **Phase 12 (v0.12.0):** `main.py --replay` plays a capture file through the full system, `scripts/make_samples.py` builds a deterministic reference capture for every attack (checked by the test suite), and [DEMO.md](DEMO.md) scripts every scenario with its expected alerts. The release also closes what earlier phases had deferred: the **packet log** (Phase 5's `packets` table, written in batches by a seventh queue consumer, trimmed to `packet_retention_hours`, with SQLite switched to WAL so the dashboard reads while the core writes), the **built-in statistics** (packets per second, top talkers, alerts per hour, the attack mix) feeding new dashboard charts, an **incident log** filtered by type, severity and time, and the **`d` key** that opens the dashboard. Two latent bugs surfaced on the way: the parser ignored IPv6 – 99% of a live capture on the development machine – and a replayed packet's timestamp type crashed the alert line.
 
