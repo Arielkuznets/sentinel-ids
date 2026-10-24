@@ -75,6 +75,7 @@ network:
 ui:
   score_high: 70
   score_medium: 40
+  dashboard_startup_seconds: 10   # how long 'd' waits for a dashboard it started to listen
 
 web:
   host: 127.0.0.1

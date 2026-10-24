@@ -26,6 +26,7 @@ from core.response.firewall import FirewallManager
 from db.database import init_db
 from db.queries import save_alert, update_alert_repeat
 from ui.tui.app import SentinelApp
+from ui.tui.dashboard import DashboardLauncher
 
 
 def _load_config(path: str = "config/config.yaml") -> dict:
@@ -204,13 +205,16 @@ def main() -> None:
     firewall        = FirewallManager(direction=resp_cfg["direction"])
     response_engine = ResponseEngine(firewall, SessionLocal, whitelist=resp_cfg["whitelist"])
 
-    ui_cfg = config["ui"]
+    ui_cfg, web_cfg = config["ui"], config["web"]
+    dashboard = DashboardLauncher(web_cfg["host"], web_cfg["port"],
+                                  startup_seconds=ui_cfg["dashboard_startup_seconds"])
     app = SentinelApp(
         packet_queue=consumer,
         session_factory=SessionLocal,
         response_engine=response_engine,
         score_high   = ui_cfg["score_high"],
         score_medium = ui_cfg["score_medium"],
+        dashboard    = dashboard,
     )
 
     pipeline = [capture, ps_detector, arp_detector, bf_detector,
@@ -236,6 +240,7 @@ def main() -> None:
         # q, Ctrl+C or a crash in the UI - every way out stops the pipeline, so the
         # baseline and the packet log write what they hold before the process ends.
         _stop_all(pipeline)
+        dashboard.close()       # only a server the 'd' key started
 
 
 if __name__ == "__main__":
