@@ -2,6 +2,7 @@ import time
 
 from scapy.layers.dns import DNS, DNSQR
 from scapy.layers.inet import IP, TCP, UDP, ICMP
+from scapy.layers.inet6 import IPv6
 from scapy.layers.l2 import Ether, ARP
 
 
@@ -55,13 +56,20 @@ class PacketParser:
         result["dst_mac"] = eth.dst
 
     def _extract_ip(self, packet, result: dict) -> None:
-        if not packet.haslayer(IP):
-            return
-        ip = packet[IP]
-        result["src_ip"]   = ip.src
-        result["dst_ip"]   = ip.dst
-        result["ttl"]      = ip.ttl
-        result["protocol"] = self._protocol_name(ip.proto)
+        if packet.haslayer(IP):
+            ip = packet[IP]
+            result["src_ip"]   = ip.src
+            result["dst_ip"]   = ip.dst
+            result["ttl"]      = ip.ttl
+            result["protocol"] = self._protocol_name(ip.proto)
+        elif packet.haslayer(IPv6):
+            # The same fields under IPv6's names: the hop limit is the TTL, and the
+            # next header names the transport the way IPv4's proto field does.
+            ip6 = packet[IPv6]
+            result["src_ip"]   = ip6.src
+            result["dst_ip"]   = ip6.dst
+            result["ttl"]      = ip6.hlim
+            result["protocol"] = self._protocol_name(ip6.nh)
 
     def _extract_transport(self, packet, result: dict) -> None:
         if packet.haslayer(TCP):
@@ -111,5 +119,6 @@ class PacketParser:
             6:   "TCP",
             17:  "UDP",
             1:   "ICMP",
+            58:  "ICMPv6",
         }
         return mapping.get(proto_number, "OTHER")
