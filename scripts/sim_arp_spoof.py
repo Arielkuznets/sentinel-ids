@@ -1,5 +1,5 @@
 """
-Simulates two ARP-based attack patterns over the loopback interface.
+Simulates two ARP-based attack patterns on the interface SENTINEL listens on.
 
 Run SENTINEL first, then execute this script from a second terminal:
     python scripts/sim_arp_spoof.py
@@ -27,6 +27,12 @@ GATEWAY_IP   = "192.168.1.1"
 REAL_MAC     = "aa:bb:cc:11:22:33"
 ATTACKER_MAC = "dd:ee:ff:44:55:66"
 
+# Every frame is unicast to a locally administered MAC that no device owns. The
+# frames still leave this NIC, so SENTINEL's capture sees them, but every other
+# host's NIC drops them on the destination address. Broadcast, "the gateway is
+# at <fake MAC>" would rewrite real ARP caches and cut a live LAN off its router.
+SINK_MAC     = "02:00:00:00:00:99"
+
 
 def _send(pkt):
     sendp(pkt, iface=IFACE, verbose=False)
@@ -34,7 +40,7 @@ def _send(pkt):
 
 def scenario_a_mac_conflict():
     print("[A] Sending legitimate ARP Reply – populating SENTINEL's table...")
-    legit = Ether(src=REAL_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(
+    legit = Ether(src=REAL_MAC, dst=SINK_MAC) / ARP(
         op=2,
         hwsrc=REAL_MAC,
         psrc=GATEWAY_IP,
@@ -45,7 +51,7 @@ def scenario_a_mac_conflict():
     time.sleep(1)
 
     print("[A] Sending spoofed ARP Reply – same IP, different MAC...")
-    spoofed = Ether(src=ATTACKER_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(
+    spoofed = Ether(src=ATTACKER_MAC, dst=SINK_MAC) / ARP(
         op=2,
         hwsrc=ATTACKER_MAC,
         psrc=GATEWAY_IP,
@@ -59,7 +65,7 @@ def scenario_a_mac_conflict():
 def scenario_b_gratuitous_flood():
     print("[B] Sending Gratuitous ARP flood (src_ip == dst_ip)...")
     for i in range(5):
-        pkt = Ether(src=ATTACKER_MAC, dst="ff:ff:ff:ff:ff:ff") / ARP(
+        pkt = Ether(src=ATTACKER_MAC, dst=SINK_MAC) / ARP(
             op=2,
             hwsrc=ATTACKER_MAC,
             psrc=VICTIM_IP,

@@ -6,7 +6,7 @@ this is the row written to disk.
 """
 from typing import Any
 
-from sqlalchemy import JSON, Float, Integer, String
+from sqlalchemy import JSON, Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.database import Base
@@ -55,3 +55,26 @@ class Baseline(Base):
     mean:       Mapped[float] = mapped_column(Float)
     m2:         Mapped[float] = mapped_column(Float)
     updated_at: Mapped[float] = mapped_column(Float)
+
+
+class PacketRecord(Base):
+    """One captured packet's header fields. Maps to the `packets` table.
+
+    Fields, not bytes: the raw packet lives in the ring and leaves through PCAP
+    export, so this table only answers aggregate questions – how fast, who talks
+    most – and is trimmed to the retention window. A single composite index
+    serves every query: each one filters on a time range, and with src_ip riding
+    in the same index a top-talkers count never has to touch the table itself.
+    """
+    __tablename__ = "packets"
+    __table_args__ = (Index("ix_packets_timestamp_src_ip", "timestamp", "src_ip"),)
+
+    id:        Mapped[int]        = mapped_column(primary_key=True)
+    timestamp: Mapped[float]      = mapped_column(Float)
+    src_ip:    Mapped[str | None] = mapped_column(String)
+    dst_ip:    Mapped[str | None] = mapped_column(String)
+    protocol:  Mapped[str | None] = mapped_column(String)
+    size:      Mapped[int]        = mapped_column(Integer)
+    src_port:  Mapped[int | None] = mapped_column(Integer)
+    dst_port:  Mapped[int | None] = mapped_column(Integer)
+    flags:     Mapped[str | None] = mapped_column(String)

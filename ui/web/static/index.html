@@ -24,22 +24,65 @@
         <h1>SENTINEL<span class="accent">_IDS</span></h1>
         <div class="status">
             <span id="connection-status" class="offline">CONNECTING…</span>
+            <span class="metric">PKT/S: <span id="packet-rate">–</span></span>
             <span class="metric">ALERTS: <span id="alert-count">0</span></span>
         </div>
     </header>
 
     <main class="layout">
-        <!-- Live feed: dashboard.js prepends one <li> per incoming alert. -->
+        <!-- The incident log: live alerts arrive over the WebSocket, and changing a
+             filter re-reads history from /api/alerts. -->
         <section class="panel alerts-panel">
-            <h2>LIVE ALERTS</h2>
+            <h2>INCIDENT LOG</h2>
+            <div class="filters" id="filters">
+                <select id="filter-type" aria-label="attack type">
+                    <option value="">all types</option>
+                    <option>PORT_SCAN</option>
+                    <option>ARP_SPOOF</option>
+                    <option>BRUTE_FORCE</option>
+                    <option>DNS_ANOMALY</option>
+                    <option>SYN_FLOOD</option>
+                    <option>BASELINE_ANOMALY</option>
+                </select>
+                <select id="filter-severity" aria-label="severity">
+                    <option value="">all severities</option>
+                    <option>HIGH</option>
+                    <option>MEDIUM</option>
+                    <option>LOW</option>
+                </select>
+                <select id="filter-range" aria-label="time range">
+                    <option value="3600">last hour</option>
+                    <option value="86400">last 24 hours</option>
+                    <option value="604800">last 7 days</option>
+                </select>
+            </div>
             <ul id="alert-list" class="alert-list"></ul>
         </section>
 
-        <!-- Count-by-type bar chart, drawn and updated by Chart.js. -->
-        <section class="panel chart-panel">
-            <h2>ALERTS BY TYPE</h2>
-            <canvas id="type-chart"></canvas>
-        </section>
+        <!-- The aggregates, redrawn from /api/stats every few seconds. Each heading
+             names its window, filled in from the same payload. -->
+        <div class="side">
+            <section class="panel wide">
+                <h2>TRAFFIC · PACKETS/S <span class="window" data-window="traffic"></span></h2>
+                <div class="chart-box"><canvas id="traffic-chart"></canvas></div>
+            </section>
+            <section class="panel">
+                <h2>ALERTS BY TYPE <span class="window" data-window="alerts"></span></h2>
+                <div class="chart-box"><canvas id="type-chart"></canvas></div>
+            </section>
+            <section class="panel">
+                <h2>ALERTS PER HOUR <span class="window" data-window="alerts"></span></h2>
+                <div class="chart-box"><canvas id="hourly-chart"></canvas></div>
+            </section>
+            <section class="panel">
+                <h2>TOP TALKERS <span class="window" data-window="talkers"></span></h2>
+                <ul id="talker-list" class="side-list"></ul>
+            </section>
+            <section class="panel">
+                <h2>BLOCKED IPS</h2>
+                <ul id="blocked-list" class="side-list"></ul>
+            </section>
+        </div>
     </main>
 </body>
 </html>

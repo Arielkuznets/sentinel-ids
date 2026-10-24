@@ -5,10 +5,14 @@ logic has one home and main.py stays a thin assembly layer.
 """
 import time
 
-from sqlalchemy import select
+from sqlalchemy import Integer, cast, delete, func, insert, select
 
 from core.alerts.alert import Alert
-from db.models import AlertRecord, Baseline, BlockedIp
+from db.models import AlertRecord, Baseline, BlockedIp, PacketRecord
+
+# The parsed-packet fields that become a packets row; payload and MACs stay out.
+_PACKET_FIELDS = ("timestamp", "src_ip", "dst_ip", "protocol", "size",
+                  "src_port", "dst_port", "flags")
 
 
 def save_alert(session_factory, alert: Alert) -> int:
@@ -141,3 +145,119 @@ def load_baselines(session_factory) -> dict[str, tuple[int, float, float]]:
     with session_factory() as session:
         rows = session.scalars(select(Baseline)).all()
         return {r.ip: (r.n, r.mean, r.m2) for r in rows}
+
+
+def save_packets(session_factory, packets: list[dict]) -> None:
+    """Insert a batch of parsed packets as rows, in one transaction.
+
+    Packets are not rare the way alerts are: a commit per packet would pay a full
+    transaction per packet, while one executemany per batch pays it once.
+    """
+    if not packets:
+        return
+    rows = [{field: packet.get(field) for field in _PACKET_FIELDS} for packet in packets]
+    with session_factory() as session:
+        session.execute(insert(PacketRecord), rows)
+        session.commit()
+
+
+def delete_packets_before(session_factory, cutoff: float) -> int:
+    """Delete every packet older than `cutoff` and return how many went.
+
+    The range rides the index that leads with timestamp, so trimming the oldest
+    rows stays cheap however large the table has grown.
+    """
+    with session_factory() as session:
+        result = session.execute(delete(PacketRecord).where(PacketRecord.timestamp < cutoff))
+        session.commit()
+        return result.rowcount
+
+
+def packet_rate(session_factory, seconds: int, now: float | None = None) -> list[tuple[int, int]]:
+    """Packets per second over the last `seconds`, oldest first, as (second, count).
+
+    SQL groups on the whole-second part of the timestamp, and a second with no
+    traffic comes back as no row at all - so the gaps are filled with zeros here.
+    A chart that skipped the silent seconds would draw an outage as a flat line.
+    """
+    if now is None:
+        now = time.time()
+    first  = int(now) - seconds + 1
+    second = cast(PacketRecord.timestamp, Integer)
+    with session_factory() as session:
+        stmt = (
+            select(second, func.count())
+            .where(PacketRecord.timestamp >= first)
+            .group_by(second)
+        )
+        counts = dict(session.execute(stmt).all())
+    return [(s, counts.get(s, 0)) for s in range(first, first + seconds)]
+
+
+def top_sources(session_factory, seconds: int, limit: int = 5,
+                now: float | None = None) -> list[tuple[str, int]]:
+    """The `limit` source IPs that sent the most packets in the last `seconds`."""
+    if now is None:
+        now = time.time()
+    packets = func.count().label("packets")
+    with session_factory() as session:
+        stmt = (
+            select(PacketRecord.src_ip, packets)
+            .where(PacketRecord.timestamp >= now - seconds, PacketRecord.src_ip.is_not(None))
+            .group_by(PacketRecord.src_ip)
+            .order_by(packets.desc())
+            .limit(limit)
+        )
+        return [(ip, count) for ip, count in session.execute(stmt).all()]
+
+
+def alerts_per_hour(session_factory, hours: int, now: float | None = None) -> list[tuple[int, int]]:
+    """Alert episodes per hour over the last `hours`, oldest first, as (hour_start, count).
+
+    Hours are epoch hours, so a bucket starts on the hour in UTC; the browser
+    shows it in local time. Quiet hours are filled with zeros, as in packet_rate.
+    """
+    if now is None:
+        now = time.time()
+    first = int(now // 3600) - hours + 1
+    hour  = cast(AlertRecord.timestamp / 3600, Integer)
+    with session_factory() as session:
+        stmt = (
+            select(hour, func.count())
+            .where(AlertRecord.timestamp >= first * 3600)
+            .group_by(hour)
+        )
+        counts = dict(session.execute(stmt).all())
+    return [(h * 3600, counts.get(h, 0)) for h in range(first, first + hours)]
+
+
+def alert_type_counts(session_factory, seconds: int, now: float | None = None) -> dict[str, int]:
+    """How many alert episodes of each type in the last `seconds` - the attack mix."""
+    if now is None:
+        now = time.time()
+    with session_factory() as session:
+        stmt = (
+            select(AlertRecord.type, func.count())
+            .where(AlertRecord.timestamp >= now - seconds)
+            .group_by(AlertRecord.type)
+        )
+        return dict(session.execute(stmt).all())
+
+
+def find_alerts(session_factory, since: float, alert_type: str | None = None,
+                severity: str | None = None, limit: int = 100) -> list[AlertRecord]:
+    """The incident log: alerts since `since`, optionally one type and one
+    severity, newest first, at most `limit` rows.
+
+    The filters arrive from a browser's query string. Each one becomes a bound
+    parameter - a value the database compares against, never text spliced into
+    the SQL - so whatever is typed can only fail to match, not reshape the query.
+    """
+    stmt = select(AlertRecord).where(AlertRecord.timestamp >= since)
+    if alert_type is not None:
+        stmt = stmt.where(AlertRecord.type == alert_type)
+    if severity is not None:
+        stmt = stmt.where(AlertRecord.severity == severity)
+    stmt = stmt.order_by(AlertRecord.timestamp.desc()).limit(limit)
+    with session_factory() as session:
+        return list(session.scalars(stmt).all())

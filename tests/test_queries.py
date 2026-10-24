@@ -4,18 +4,42 @@ Each test runs against a fresh, file-backed SQLite database provided by the
 `session_factory` fixture, so tests are fully isolated. The queries take `now`
 explicitly, so time-based filtering is deterministic.
 """
+from sqlalchemy import select
+
 from core.alerts.alert import Alert
+from db.models import PacketRecord
 from db.queries import (
     active_blocks,
+    alert_type_counts,
+    alerts_per_hour,
     alerts_since,
+    delete_packets_before,
+    find_alerts,
     is_blocked,
     load_baselines,
+    packet_rate,
     record_block,
     record_unblock,
     save_alert,
     save_baselines,
+    save_packets,
+    top_sources,
     update_alert_repeat,
 )
+
+
+def _packet(ts: float, src: str = "10.0.0.5", **fields) -> dict:
+    """A parsed packet as PacketParser emits it, payload and MACs included."""
+    return {"timestamp": ts, "size": 60, "src_mac": "aa:aa", "dst_mac": "bb:bb",
+            "src_ip": src, "dst_ip": "10.0.0.9", "ttl": 64, "protocol": "TCP",
+            "src_port": 51000, "dst_port": 443, "flags": "S", "seq": 1,
+            "payload": b"secret", "arp_op": None, "dns_qname": None,
+            "dns_qtype": None, **fields}
+
+
+def _stored_packets(session_factory) -> list[PacketRecord]:
+    with session_factory() as session:
+        return list(session.scalars(select(PacketRecord).order_by(PacketRecord.timestamp)))
 
 
 def test_save_alert_and_query_back(session_factory):
@@ -158,3 +182,121 @@ def test_save_baselines_upserts_existing_ip(session_factory):
 
 def test_load_baselines_empty_is_empty_dict(session_factory):
     assert load_baselines(session_factory) == {}
+
+
+def test_save_packets_writes_the_whole_batch(session_factory):
+    save_packets(session_factory, [_packet(1000.0 + i) for i in range(50)])
+
+    rows = _stored_packets(session_factory)
+    assert len(rows) == 50
+    assert rows[0].timestamp == 1000.0
+    assert (rows[0].src_ip, rows[0].dst_port, rows[0].flags) == ("10.0.0.5", 443, "S")
+
+
+def test_save_packets_keeps_header_fields_never_the_payload(session_factory):
+    # The packets table answers "how much, from whom" - the bytes belong to the
+    # ring and the pcap evidence, and keeping them here would bloat every row.
+    save_packets(session_factory, [_packet(1000.0)])
+
+    row = _stored_packets(session_factory)[0]
+    assert not hasattr(row, "payload")
+    assert row.size == 60
+
+
+def test_save_packets_accepts_a_packet_without_ports(session_factory):
+    # ARP has no transport layer; its ports and flags arrive as None.
+    arp = _packet(1000.0, src="10.0.0.1", protocol="ARP", src_port=None,
+                  dst_port=None, flags=None, arp_op=2)
+    save_packets(session_factory, [arp])
+
+    row = _stored_packets(session_factory)[0]
+    assert row.protocol == "ARP"
+    assert row.dst_port is None
+
+
+def test_save_packets_with_an_empty_batch_is_a_noop(session_factory):
+    save_packets(session_factory, [])
+    assert _stored_packets(session_factory) == []
+
+
+def test_delete_packets_before_keeps_the_retention_window(session_factory):
+    save_packets(session_factory, [_packet(ts) for ts in (1000.0, 2000.0, 3000.0)])
+
+    removed = delete_packets_before(session_factory, cutoff=2000.0)
+
+    assert removed == 1                                       # only t=1000 is older
+    assert [r.timestamp for r in _stored_packets(session_factory)] == [2000.0, 3000.0]
+
+
+def test_packet_rate_counts_each_second_and_fills_the_silent_ones(session_factory):
+    save_packets(session_factory, [_packet(t) for t in (1000.1, 1000.7, 1002.5)])
+
+    rate = packet_rate(session_factory, seconds=4, now=1003.2)
+
+    # 1001 carried no traffic: it has to come back as a zero, not a missing point
+    assert rate == [(1000, 2), (1001, 0), (1002, 1), (1003, 0)]
+
+
+def test_top_sources_ranks_by_packets_within_the_window(session_factory):
+    packets = ([_packet(1000.0 + i, src="10.0.0.1") for i in range(5)]
+               + [_packet(1000.0 + i, src="10.0.0.2") for i in range(9)]
+               + [_packet(1000.0, src="10.0.0.3")]
+               + [_packet(1.0, src="10.0.0.9") for _ in range(50)])   # long gone
+    save_packets(session_factory, packets)
+
+    top = top_sources(session_factory, seconds=60, limit=2, now=1010.0)
+
+    assert top == [("10.0.0.2", 9), ("10.0.0.1", 5)]
+
+
+def test_top_sources_skips_packets_without_a_source(session_factory):
+    save_packets(session_factory, [_packet(1000.0, src=None)] * 3 + [_packet(1000.0)])
+
+    assert top_sources(session_factory, seconds=60, limit=5, now=1010.0) == [("10.0.0.5", 1)]
+
+
+def test_alerts_per_hour_buckets_episodes_and_fills_quiet_hours(session_factory):
+    for ts in (7200.0, 7300.0, 14500.0):                 # two in hour 2, one in hour 4
+        save_alert(session_factory, Alert("PORT_SCAN", "HIGH", "1.1.1.1", timestamp=ts))
+
+    hourly = alerts_per_hour(session_factory, hours=3, now=14600.0)
+
+    assert hourly == [(7200, 2), (10800, 0), (14400, 1)]
+
+
+def test_alert_type_counts_tallies_episodes_by_type(session_factory):
+    for atype in ("PORT_SCAN", "PORT_SCAN", "ARP_SPOOF"):
+        save_alert(session_factory, Alert(atype, "HIGH", "1.1.1.1", timestamp=5000.0))
+    save_alert(session_factory, Alert("DNS_ANOMALY", "LOW", "1.1.1.1", timestamp=10.0))   # outside
+
+    counts = alert_type_counts(session_factory, seconds=3600, now=5000.0)
+
+    assert counts == {"PORT_SCAN": 2, "ARP_SPOOF": 1}
+
+
+def test_find_alerts_filters_by_type_severity_and_time(session_factory):
+    save_alert(session_factory, Alert("PORT_SCAN", "HIGH", "1.1.1.1", timestamp=1000.0))
+    save_alert(session_factory, Alert("PORT_SCAN", "LOW",  "1.1.1.1", timestamp=1100.0))
+    save_alert(session_factory, Alert("ARP_SPOOF", "HIGH", "2.2.2.2", timestamp=1200.0))
+    save_alert(session_factory, Alert("PORT_SCAN", "HIGH", "3.3.3.3", timestamp=10.0))     # too old
+
+    assert [r.timestamp for r in find_alerts(session_factory, since=500.0)] == [1200.0, 1100.0, 1000.0]
+    assert [r.timestamp for r in find_alerts(session_factory, since=500.0, alert_type="PORT_SCAN")] == [1100.0, 1000.0]
+    assert [r.type for r in find_alerts(session_factory, since=500.0, severity="HIGH")] == ["ARP_SPOOF", "PORT_SCAN"]
+
+
+def test_find_alerts_treats_a_filter_as_a_value_never_as_sql(session_factory):
+    # The type comes from a query string in the browser. Bound as a parameter it
+    # can only ever be compared against type names - and match none of them.
+    save_alert(session_factory, Alert("PORT_SCAN", "HIGH", "1.1.1.1", timestamp=1000.0))
+
+    assert find_alerts(session_factory, since=0.0, alert_type="x' OR '1'='1") == []
+
+
+def test_find_alerts_keeps_the_newest_when_it_hits_the_limit(session_factory):
+    for i in range(10):
+        save_alert(session_factory, Alert("PORT_SCAN", "HIGH", "1.1.1.1", timestamp=1000.0 + i))
+
+    rows = find_alerts(session_factory, since=0.0, limit=3)
+
+    assert [r.timestamp for r in rows] == [1009.0, 1008.0, 1007.0]

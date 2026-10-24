@@ -10,17 +10,26 @@ side effect of binding a port.
 """
 import asyncio
 import contextlib
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.alerts.scoring import score_level
 from db.database import init_db
 from db.models import AlertRecord
-from db.queries import alerts_since
+from db.queries import (
+    active_blocks,
+    alert_type_counts,
+    alerts_per_hour,
+    alerts_since,
+    find_alerts,
+    packet_rate,
+    top_sources,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -78,6 +87,31 @@ def _alert_to_message(record: AlertRecord, score_high: int, score_medium: int) -
     }
 
 
+def collect_stats(session_factory, web_cfg: dict, lag_seconds: float, now: float) -> dict[str, Any]:
+    """Everything the dashboard's charts draw, read in one pass.
+
+    The traffic series stops lag_seconds short of now: the newest second is still
+    being written by the packet log, and drawing it would show a dip that is only
+    a flush on its way.
+    """
+    hours   = web_cfg["alert_stats_hours"]
+    traffic = packet_rate(session_factory, web_cfg["traffic_seconds"], now=now - lag_seconds)
+    talkers = top_sources(session_factory, web_cfg["top_sources_seconds"],
+                          limit=web_cfg["top_sources"], now=now)
+    return {
+        "traffic":         [{"t": t, "packets": n} for t, n in traffic],
+        "top_sources":     [{"ip": ip, "packets": n} for ip, n in talkers],
+        "alerts_per_hour": [{"t": t, "alerts": n}
+                            for t, n in alerts_per_hour(session_factory, hours, now=now)],
+        "alert_types":     alert_type_counts(session_factory, hours * 3600, now=now),
+        "blocked":         [{"ip": b.ip, "blocked_at": b.blocked_at, "reason": b.reason}
+                            for b in active_blocks(session_factory)],
+        "windows":         {"traffic_seconds":     web_cfg["traffic_seconds"],
+                            "top_sources_seconds": web_cfg["top_sources_seconds"],
+                            "alert_stats_hours":   hours},
+    }
+
+
 def create_app(config: dict) -> FastAPI:
     """Builds the FastAPI application from runtime config."""
     history_seconds = config["web"]["alert_history_seconds"]
@@ -86,6 +120,10 @@ def create_app(config: dict) -> FastAPI:
     score_medium = config["ui"]["score_medium"]
     session_factory = init_db(config["database"]["path"])
     manager = ConnectionManager()
+
+    # The packet log writes at most packet_flush_seconds late, and the current
+    # second is still filling: the traffic chart stops that far short of now.
+    traffic_lag = config["database"]["packet_flush_seconds"] + 1
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -126,6 +164,30 @@ def create_app(config: dict) -> FastAPI:
     def index() -> FileResponse:
         """Serves the dashboard page."""
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/api/stats")
+    async def stats() -> dict[str, Any]:
+        """The aggregates behind the charts.
+
+        Polled rather than pushed: a count refreshed every few seconds needs no
+        socket of its own, while an alert is an event, and events ride /ws.
+        """
+        return await asyncio.to_thread(collect_stats, session_factory, config["web"],
+                                       traffic_lag, time.time())
+
+    @app.get("/api/alerts")
+    async def incidents(
+        seconds:    int = Query(3600, gt=0),
+        alert_type: str | None = Query(None, alias="type", max_length=32),
+        severity:   Literal["HIGH", "MEDIUM", "LOW"] | None = None,
+    ) -> list[dict[str, Any]]:
+        """The incident log: alerts from the last `seconds`, optionally narrowed to
+        one type and one severity, newest first. A malformed parameter is turned
+        away with a 422 by FastAPI's validation, before any query runs.
+        """
+        records = await asyncio.to_thread(find_alerts, session_factory, time.time() - seconds,
+                                          alert_type, severity, config["web"]["incident_limit"])
+        return [_alert_to_message(record, score_high, score_medium) for record in records]
 
     @app.websocket("/ws")
     async def alert_stream(websocket: WebSocket) -> None:

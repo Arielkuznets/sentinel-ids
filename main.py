@@ -1,6 +1,10 @@
+import argparse
 import queue
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import yaml
 
 from core.alerts.alert import Alert
@@ -11,6 +15,7 @@ from core.alerts.scoring import ThreatScorer
 from core.capture.engine import PacketCapture
 from core.capture.parser import PacketParser
 from core.capture.queue import PacketQueue
+from core.capture.recorder import PacketRecorder
 from core.capture.ring import PacketRing
 from core.detectors.baseline import BaselineDetector
 from core.detectors.arp_spoof import ArpSpoofDetector
@@ -23,12 +28,30 @@ from core.response.firewall import FirewallManager
 from db.database import init_db
 from db.queries import save_alert, update_alert_repeat
 from ui.tui.app import SentinelApp
+from ui.tui.dashboard import DashboardLauncher
 
 
 def _load_config(path: str = "config/config.yaml") -> dict:
     """Loads runtime configuration parameters."""
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Live capture by default; --replay plays a capture file through the same pipeline."""
+    parser = argparse.ArgumentParser(
+        description="SENTINEL IDS - watch the live interface, or replay a capture file.")
+    parser.add_argument("--replay", metavar="PCAP",
+                        help="replay this capture file instead of sniffing the interface")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="replay pace: 1 = as recorded (default), 10 = ten times "
+                             "faster, 0 = as fast as possible")
+    args = parser.parse_args(argv)
+    if args.replay and not Path(args.replay).is_file():
+        parser.error(f"no such capture file: {args.replay}")
+    if args.speed < 0:
+        parser.error("--speed cannot be negative")
+    return args
 
 
 def _handle_alert(alert: Alert, session_factory, deduper: Deduplicator,
@@ -87,15 +110,26 @@ def _alert_loop(alert_queue: queue.Queue, session_factory, deduper: Deduplicator
                 pass
 
 
-def main() -> None:
+def _stop_all(components: list) -> None:
+    """Stop every component at once.
+
+    A consumer's stop() waits up to a second for its thread to wake from the
+    queue and notice; stopping eight of them one by one would add those waits up.
+    """
+    with ThreadPoolExecutor(max_workers=len(components)) as pool:
+        list(pool.map(lambda component: component.stop(), components))
+
+
+def main(argv: list[str] | None = None) -> None:
+    args      = _parse_args(argv)
     config    = _load_config()
     interface = config["network"]["interface"]
     if interface == "auto":
         interface = None
 
     # Persistence – build the DB and a session factory from config
-    db_path      = config["database"]["path"]
-    SessionLocal = init_db(db_path)
+    db_cfg       = config["database"]
+    SessionLocal = init_db(db_cfg["path"])
 
     # Dependency Injection & Pipeline Assembly
     parser      = PacketParser()
@@ -112,7 +146,8 @@ def main() -> None:
                                max_files=pcap_cfg["max_files"])
 
     consumer    = pkt_queue.subscribe()
-    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring)
+    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring,
+                                replay_path=args.replay, replay_speed=args.speed)
     ps_cfg      = config["detectors"]["port_scan"]
     ps_detector = PortScanDetector(
         pkt_queue.subscribe(),
@@ -178,38 +213,44 @@ def main() -> None:
         session_factory           = SessionLocal,
     )
 
+    recorder = PacketRecorder(
+        pkt_queue.subscribe(),
+        SessionLocal,
+        batch_size      = db_cfg["packet_batch_size"],
+        flush_seconds   = db_cfg["packet_flush_seconds"],
+        retention_hours = db_cfg["packet_retention_hours"],
+        cleanup_seconds = db_cfg["packet_cleanup_seconds"],
+    )
+
     resp_cfg        = config["response"]
     firewall        = FirewallManager(direction=resp_cfg["direction"])
     response_engine = ResponseEngine(firewall, SessionLocal, whitelist=resp_cfg["whitelist"])
 
-    ui_cfg = config["ui"]
+    ui_cfg, web_cfg = config["ui"], config["web"]
+    dashboard = DashboardLauncher(web_cfg["host"], web_cfg["port"],
+                                  startup_seconds=ui_cfg["dashboard_startup_seconds"])
     app = SentinelApp(
         packet_queue=consumer,
         session_factory=SessionLocal,
         response_engine=response_engine,
         score_high   = ui_cfg["score_high"],
         score_medium = ui_cfg["score_medium"],
+        dashboard    = dashboard,
+        packets_seen = lambda: capture.packets_seen,
     )
+    # The header says which source is feeding everything below it.
+    app.sub_title = (f"replay · {Path(args.replay).name}" if args.replay
+                     else f"live · {interface or 'default interface'}")
 
-    def _shutdown(sig, frame):
-        capture.stop()
-        ps_detector.stop()
-        arp_detector.stop()
-        bf_detector.stop()
-        dns_detector.stop()
-        syn_detector.stop()
-        base_detector.stop()
-        app.exit()
+    pipeline = [capture, ps_detector, arp_detector, bf_detector,
+                dns_detector, syn_detector, base_detector, recorder]
 
-    signal.signal(signal.SIGINT, _shutdown)
+    # Ctrl+C only asks the UI to close; the pipeline stops below, on the one path
+    # every exit takes.
+    signal.signal(signal.SIGINT, lambda sig, frame: app.exit())
 
-    capture.start()
-    ps_detector.start()
-    arp_detector.start()
-    bf_detector.start()
-    dns_detector.start()
-    syn_detector.start()
-    base_detector.start()
+    for component in pipeline:
+        component.start()
 
     threading.Thread(
         target=_alert_loop,
@@ -218,7 +259,13 @@ def main() -> None:
         daemon=True,
     ).start()
 
-    app.run()
+    try:
+        app.run()
+    finally:
+        # q, Ctrl+C or a crash in the UI - every way out stops the pipeline, so the
+        # baseline and the packet log write what they hold before the process ends.
+        _stop_all(pipeline)
+        dashboard.close()       # only a server the 'd' key started
 
 
 if __name__ == "__main__":
