@@ -1,7 +1,9 @@
+import argparse
 import queue
 import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import yaml
 
@@ -33,6 +35,23 @@ def _load_config(path: str = "config/config.yaml") -> dict:
     """Loads runtime configuration parameters."""
     with open(path) as f:
         return yaml.safe_load(f)
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Live capture by default; --replay plays a capture file through the same pipeline."""
+    parser = argparse.ArgumentParser(
+        description="SENTINEL IDS - watch the live interface, or replay a capture file.")
+    parser.add_argument("--replay", metavar="PCAP",
+                        help="replay this capture file instead of sniffing the interface")
+    parser.add_argument("--speed", type=float, default=1.0,
+                        help="replay pace: 1 = as recorded (default), 10 = ten times "
+                             "faster, 0 = as fast as possible")
+    args = parser.parse_args(argv)
+    if args.replay and not Path(args.replay).is_file():
+        parser.error(f"no such capture file: {args.replay}")
+    if args.speed < 0:
+        parser.error("--speed cannot be negative")
+    return args
 
 
 def _handle_alert(alert: Alert, session_factory, deduper: Deduplicator,
@@ -101,7 +120,8 @@ def _stop_all(components: list) -> None:
         list(pool.map(lambda component: component.stop(), components))
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args      = _parse_args(argv)
     config    = _load_config()
     interface = config["network"]["interface"]
     if interface == "auto":
@@ -126,7 +146,8 @@ def main() -> None:
                                max_files=pcap_cfg["max_files"])
 
     consumer    = pkt_queue.subscribe()
-    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring)
+    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring,
+                                replay_path=args.replay, replay_speed=args.speed)
     ps_cfg      = config["detectors"]["port_scan"]
     ps_detector = PortScanDetector(
         pkt_queue.subscribe(),
@@ -215,7 +236,11 @@ def main() -> None:
         score_high   = ui_cfg["score_high"],
         score_medium = ui_cfg["score_medium"],
         dashboard    = dashboard,
+        packets_seen = lambda: capture.packets_seen,
     )
+    # The header says which source is feeding everything below it.
+    app.sub_title = (f"replay · {Path(args.replay).name}" if args.replay
+                     else f"live · {interface or 'default interface'}")
 
     pipeline = [capture, ps_detector, arp_detector, bf_detector,
                 dns_detector, syn_detector, base_detector, recorder]

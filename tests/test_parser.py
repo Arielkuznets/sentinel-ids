@@ -10,6 +10,7 @@ import queue
 from scapy.layers.inet import IP, TCP, UDP
 from scapy.layers.inet6 import ICMPv6EchoRequest, IPv6
 from scapy.layers.l2 import ARP, Ether
+from scapy.utils import rdpcap, wrpcap
 
 from core.capture.parser import PacketParser
 from core.detectors.port_scan import PortScanDetector
@@ -145,3 +146,15 @@ def test_an_ipv6_scan_reaches_the_port_scan_detector():
     alert = alerts.get_nowait()
     assert alert.type == "PORT_SCAN"
     assert alert.src_ip == "2001:db8::bad"
+
+
+def test_a_packet_read_from_a_capture_file_gets_a_float_timestamp(tmp_path):
+    # Scapy times a file's packets with an EDecimal, not a float. Arithmetic on it
+    # works, but datetime.fromtimestamp refuses it - the first replayed alert
+    # crashed the TUI's alert line and lost the alert at its pcap filename.
+    path = (tmp_path / "one.pcap").as_posix()
+    wrpcap(path, [IP(src="10.0.0.5", dst="10.0.0.1") / TCP()])
+
+    result = PacketParser().parse(rdpcap(path)[0])
+
+    assert type(result["timestamp"]) is float

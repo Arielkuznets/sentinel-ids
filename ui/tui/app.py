@@ -1,4 +1,5 @@
 import queue
+from collections.abc import Callable
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
@@ -30,7 +31,8 @@ class SentinelApp(App):
 
     def __init__(self, packet_queue: queue.Queue, session_factory, response_engine,
                  score_high: int = 70, score_medium: int = 40,
-                 dashboard: DashboardLauncher | None = None):
+                 dashboard: DashboardLauncher | None = None,
+                 packets_seen: Callable[[], int] | None = None):
         super().__init__()
         self._packet_queue    = packet_queue
         self._session_factory = session_factory
@@ -38,6 +40,9 @@ class SentinelApp(App):
         self._score_high      = score_high
         self._score_medium    = score_medium
         self._dashboard       = dashboard
+        # The header counts what the capture saw. The log drains at most 100
+        # packets a second, so its own tally would undercount any busy network.
+        self._packets_seen    = packets_seen or (lambda: self._packet_count)
         self._packet_count    = 0
         self._alert_count     = 0
         self._last_alert: Alert | None = None   # the IP that 'b' will act on
@@ -71,8 +76,7 @@ class SentinelApp(App):
             self._packet_count += 1
             packet_log.add_packet(packet)
             drained += 1
-        if drained:
-            stats_bar.update_packets(self._packet_count)
+        stats_bar.update_packets(self._packets_seen())
 
     def push_alert(self, alert: Alert) -> None:
         # A new alert episode. Called via app.call_from_thread() from the loop.
