@@ -74,7 +74,10 @@ class AlertPanel(Widget):
         self._score_medium = score_medium
 
     def compose(self) -> ComposeResult:
-        yield RichLog(highlight=True, markup=True, max_lines=100, id="alert-richlog")
+        # Wrapped: an alert line runs past 100 columns, and the markers that change
+        # (z=, pcap, ×count) sit at its end - unwrapped, they scroll off the edge.
+        yield RichLog(highlight=True, markup=True, max_lines=100, wrap=True, min_width=40,
+                      id="alert-richlog")
 
     def render_episodes(self, episodes) -> None:
         log = self.query_one(RichLog)
