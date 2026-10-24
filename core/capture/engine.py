@@ -33,6 +33,7 @@ class PacketCapture:
         self._replay_path = replay_path
         self._replay_speed = replay_speed
         self._seen = 0
+        self._unreadable = 0
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -68,6 +69,11 @@ class PacketCapture:
         so the UI can poll it from its own thread without a lock.
         """
         return self._seen
+
+    @property
+    def packets_unreadable(self) -> int:
+        """Packets the pipeline could not handle and skipped - see _handle_packet."""
+        return self._unreadable
 
     def replay_pcap(self, path: str, speed: float = 0.0) -> None:
         """Push every packet of a capture file through the pipeline, in order.
@@ -106,8 +112,16 @@ class PacketCapture:
 
     def _handle_packet(self, raw_packet) -> None:
         self._seen += 1
-        # parse() always returns a dict - no None to guard against.
-        parsed = self._parser.parse(raw_packet)
+        try:
+            # parse() always returns a dict - no None to guard against.
+            parsed = self._parser.parse(raw_packet)
+        except Exception:
+            # Scapy's sniffer closes its socket when the callback raises, so one
+            # packet the parser cannot read would end the capture - silently, and
+            # on demand for anyone able to craft such a packet. It costs that one
+            # packet instead, and the count says how many there were.
+            self._unreadable += 1
+            return
         if self._ring is not None:
             self._ring.add(parsed["timestamp"], parsed["src_ip"], parsed["dst_ip"], raw_packet)
         self._queue.put(parsed)
