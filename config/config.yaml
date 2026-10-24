@@ -25,10 +25,42 @@ detectors:
     subdomain_max_length: 50
     entropy_threshold: 3.5
     cooldown_seconds: 60
+  baseline:
+    interval_seconds: 10
+    min_samples: 30
+    z_medium: 3.0
+    z_high: 5.0
+    idle_evict_seconds: 3600
+    deviation_max_age_seconds: 30
 
 alerts:
   dedup_window_seconds: 60
-  pcap_capture_seconds: 30
+  geoip:
+    database_path: data/GeoLite2-City.mmdb
+  pcap:
+    buffer_seconds: 30
+    max_packets: 20000
+    output_dir: captures
+    max_files: 50
+  scoring:
+    # Evidence – each term adds a bounded slice of points, and the three are summed.
+    severity_points:
+      LOW: 15
+      MEDIUM: 25
+      HIGH: 35
+    frequency_max: 20      # points a fully saturated repeat count is worth
+    frequency_cap: 64      # repeats at which the frequency term saturates
+    deviation_max: 10      # points a fully saturated deviation is worth
+    deviation_cap: 8.0     # z-score at which the deviation term saturates
+    # Amplifier – multiplies the evidence total, then the score is clamped to 100.
+    default_type_weight: 1.0
+    type_weights:
+      ARP_SPOOF: 1.8       # MITM – breaks the trust the whole segment relies on
+      SYN_FLOOD: 1.5
+      PORT_SCAN: 1.2
+      BRUTE_FORCE: 1.0
+      DNS_ANOMALY: 0.9
+      BASELINE_ANOMALY: 1.0
 
 database:
   path: sentinel.db
@@ -36,6 +68,10 @@ database:
 
 network:
   interface: auto
+
+ui:
+  score_high: 70
+  score_medium: 40
 
 web:
   host: 127.0.0.1

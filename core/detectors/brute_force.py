@@ -140,16 +140,16 @@ class BruteForceDetector:
 
         count = window.add(now)
         if count >= threshold:
-            self._emit(src_ip, dst_port, service, count)
+            self._emit(src_ip, dst_port, service, count, now)
             self._cooldown.mark(key, now)
             window.clear()
 
-    def _emit(self, src_ip: str, dst_port: int, service: str, count: int) -> None:
+    def _emit(self, src_ip: str, dst_port: int, service: str, count: int, now: float) -> None:
         self._alerts.put(Alert(
             type      = "BRUTE_FORCE",
             severity  = "HIGH",
             src_ip    = src_ip,
-            timestamp = time.time(),
+            timestamp = now,
             details   = {
                 "service":       service,
                 "dst_port":      dst_port,

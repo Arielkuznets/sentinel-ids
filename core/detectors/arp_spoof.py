@@ -79,10 +79,10 @@ class ArpSpoofDetector:
         if not src_ip or not src_mac:
             return
 
-        self._check_mac_conflict(src_ip, src_mac)
+        self._check_mac_conflict(src_ip, src_mac, now)
         self._check_gratuitous_flood(src_ip, src_mac, dst_ip, arp_op, now)
 
-    def _check_mac_conflict(self, src_ip: str, src_mac: str) -> None:
+    def _check_mac_conflict(self, src_ip: str, src_mac: str, now: float) -> None:
         known_mac = self._arp_table.get(src_ip)
 
         if known_mac is None:
@@ -93,6 +93,7 @@ class ArpSpoofDetector:
             self._emit(
                 src_ip   = src_ip,
                 severity = "HIGH",
+                now      = now,
                 details  = {
                     "reason":    "mac_conflict",
                     "known_mac": known_mac,
@@ -122,6 +123,7 @@ class ArpSpoofDetector:
             self._emit(
                 src_ip   = src_ip,
                 severity = "MEDIUM",
+                now      = now,
                 details  = {
                     "reason":  "gratuitous_arp_flood",
                     "src_mac": src_mac,
@@ -137,11 +139,11 @@ class ArpSpoofDetector:
         prune_idle_windows(self._gratuitous, now)
         self._last_sweep = now
 
-    def _emit(self, src_ip: str, severity: str, details: dict) -> None:
+    def _emit(self, src_ip: str, severity: str, details: dict, now: float) -> None:
         self._alerts.put(Alert(
             type      = "ARP_SPOOF",
             severity  = severity,
             src_ip    = src_ip,
-            timestamp = time.time(),
+            timestamp = now,
             details   = details,
         ))

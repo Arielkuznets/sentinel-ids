@@ -17,6 +17,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.alerts.scoring import score_level
 from db.database import init_db
 from db.models import AlertRecord
 from db.queries import alerts_since
@@ -58,15 +59,22 @@ class ConnectionManager:
                 self.disconnect(websocket)
 
 
-def _alert_to_message(record: AlertRecord) -> dict[str, Any]:
-    """Turns a stored alert row into a JSON-serialisable dict for the wire."""
+def _alert_to_message(record: AlertRecord, score_high: int, score_medium: int) -> dict[str, Any]:
+    """Turns a stored alert row into a JSON-serialisable dict for the wire.
+
+    The band is resolved here rather than in the browser so the two UIs cannot
+    drift apart on where the boundaries sit; the client only paints what it gets.
+    """
     return {
-        "id":        record.id,
-        "timestamp": record.timestamp,
-        "type":      record.type,
-        "severity":  record.severity,
-        "src_ip":    record.src_ip,
-        "details":   record.details,
+        "id":          record.id,
+        "timestamp":   record.timestamp,
+        "type":        record.type,
+        "severity":    record.severity,
+        "src_ip":      record.src_ip,
+        "count":       record.count,
+        "score":       record.score,
+        "score_level": score_level(record.score, score_high, score_medium),
+        "details":     record.details,
     }
 
 
@@ -74,6 +82,8 @@ def create_app(config: dict) -> FastAPI:
     """Builds the FastAPI application from runtime config."""
     history_seconds = config["web"]["alert_history_seconds"]
     poll_seconds = config["web"]["poll_seconds"]
+    score_high = config["ui"]["score_high"]
+    score_medium = config["ui"]["score_medium"]
     session_factory = init_db(config["database"]["path"])
     manager = ConnectionManager()
 
@@ -81,24 +91,25 @@ def create_app(config: dict) -> FastAPI:
     async def lifespan(app: FastAPI):
         """Runs the live-push broadcaster for the whole life of the server.
 
-        Code before `yield` is startup; code after is shutdown. We seed
-        last_id to the newest alert already in the DB so the broadcaster only
-        pushes alerts that arrive *after* boot — the /ws handler is what
-        replays old history to a tab on connect, not this loop.
+        Code before `yield` is startup; code after is shutdown. We seed the
+        sent counts from the DB so the broadcaster only pushes what arrives or
+        changes *after* boot — the /ws handler replays old history to a tab on
+        connect, not this loop.
         """
         seed = await asyncio.to_thread(alerts_since, session_factory, history_seconds)
-        last_id = max((record.id for record in seed), default=0)
+        sent = {record.id: record.count for record in seed}
 
         async def broadcaster() -> None:
-            """Polls the DB every poll_seconds and pushes any new alerts."""
-            nonlocal last_id
+            """Poll the DB every poll_seconds, pushing new alerts and count bumps."""
+            nonlocal sent
             while True:
                 await asyncio.sleep(poll_seconds)
                 records = await asyncio.to_thread(alerts_since, session_factory, history_seconds)
-                for record in reversed(records):  # newest-first from DB -> push oldest-first
-                    if record.id > last_id:
-                        await manager.broadcast(_alert_to_message(record))
-                        last_id = record.id
+                for record in reversed(records):  # oldest-first so the client stacks newest on top
+                    if sent.get(record.id) != record.count:
+                        await manager.broadcast(
+                            _alert_to_message(record, score_high, score_medium))
+                sent = {record.id: record.count for record in records}
 
         task = asyncio.create_task(broadcaster())
         try:
@@ -131,7 +142,7 @@ def create_app(config: dict) -> FastAPI:
         # so we hand it to a worker thread and await the result instead.
         history = await asyncio.to_thread(alerts_since, session_factory, history_seconds)
         for record in reversed(history):  # newest-first from the DB -> send oldest-first
-            await websocket.send_json(_alert_to_message(record))
+            await websocket.send_json(_alert_to_message(record, score_high, score_medium))
 
         try:
             while True:

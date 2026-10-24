@@ -1,6 +1,7 @@
 /* SENTINEL IDS dashboard — live client.
-   Opens one WebSocket to the server; for every alert pushed down the wire it
-   (1) prepends a row to the live list and (2) bumps the count-by-type chart.
+   Opens one WebSocket to the server; each message either adds a new alert row or
+   updates an existing row's repeat counter (matched by DB id), and bumps the
+   count-by-type chart on new alerts only.
    Plain ES6, no framework; the only library is Chart.js (loaded in index.html). */
 
 "use strict";
@@ -51,16 +52,59 @@ function cell(className, text) {
     return span;                         // attacker-controlled — this neutralises XSS
 }
 
+function countText(count) {
+    return count > 1 ? `×${count}` : "";   // a first sighting shows no multiplier
+}
+
+function flagOf(iso) {
+    // the two letters shifted into the regional-indicator block: "US" -> 🇺🇸
+    if (!iso || iso.length !== 2) return "";
+    const base = 0x1f1e6 - "A".charCodeAt(0);
+    return String.fromCodePoint(...[...iso.toUpperCase()].map(c => c.charCodeAt(0) + base));
+}
+
+function locationText(geo) {
+    if (!geo) return "";
+    const place = `${flagOf(geo.iso)} ${geo.country}`.trim();
+    return geo.city ? `${place} · ${geo.city}` : place;
+}
+
+function pcapText(details) {
+    const path = details && details.pcap;
+    if (!path) return "";
+    return "⬇ " + path.split(/[\\/]/).pop();   // the filename alone, not the path
+}
+
+function paintScore(el, msg) {
+    el.textContent = msg.score;
+    el.dataset.level = msg.score_level;   // the band the server resolved; drives the colour
+}
+
 function renderAlert(msg) {
+    const existing = listEl.querySelector(`li[data-id="${msg.id}"]`);
+    if (existing) {                      // a repeat: refresh everything that moves with it
+        existing.querySelector(".alert-count").textContent = countText(msg.count);
+        paintScore(existing.querySelector(".alert-score"), msg);   // the score climbs too
+        return;
+    }
+
     const li = document.createElement("li");
     li.className = "alert-item";
+    li.dataset.id = msg.id;              // lets a later count bump find this row
     li.dataset.severity = msg.severity;  // drives the CSS colour chain
 
+    const score = cell("alert-score", "");
+    paintScore(score, msg);
+
     li.append(
+        score,
         cell("alert-time", formatTime(msg.timestamp)),
         cell("alert-type", msg.type),
         cell("alert-ip", msg.src_ip),
+        cell("alert-geo", locationText(msg.details && msg.details.geo)),
         cell("alert-sev", msg.severity),
+        cell("alert-count", countText(msg.count)),
+        cell("alert-pcap", pcapText(msg.details)),
     );
 
     listEl.prepend(li);                  // newest on top
@@ -70,7 +114,7 @@ function renderAlert(msg) {
         listEl.lastElementChild.remove();
     }
 
-    countEl.textContent = ++alertCount;
+    countEl.textContent = ++alertCount;  // count distinct episodes, not repeats
     bumpChart(msg.type);
 }
 

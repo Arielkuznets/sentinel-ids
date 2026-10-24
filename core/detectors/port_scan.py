@@ -143,7 +143,7 @@ class PortScanDetector:
             type      = "PORT_SCAN",
             severity  = severity,
             src_ip    = src_ip,
-            timestamp = time.time(),
+            timestamp = now,
             details   = details,
         ))
         self._cooldown.mark(key, now)

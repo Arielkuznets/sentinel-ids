@@ -6,7 +6,7 @@ this is the row written to disk.
 """
 from typing import Any
 
-from sqlalchemy import JSON, Float, String
+from sqlalchemy import JSON, Float, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.database import Base
@@ -25,6 +25,9 @@ class AlertRecord(Base):
     # covers the rows that do have a source.
     src_ip:    Mapped[str | None]     = mapped_column(String, index=True)
     details:   Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    count:     Mapped[int]            = mapped_column(Integer, default=1)
+    last_seen: Mapped[float]          = mapped_column(Float)
+    score:     Mapped[int]            = mapped_column(Integer, default=0)
 
 
 class BlockedIp(Base):
@@ -40,3 +43,15 @@ class BlockedIp(Base):
     reason:       Mapped[str]          = mapped_column(String)
     blocked_by:   Mapped[str]          = mapped_column(String)
     unblocked_at: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
+
+class Baseline(Base):
+    """Persisted Welford state (n, mean, M2) per source IP, so a learned
+    packet-rate baseline survives a restart instead of relearning from scratch."""
+    __tablename__ = "baselines"
+
+    ip:         Mapped[str]   = mapped_column(String, primary_key=True)
+    n:          Mapped[int]   = mapped_column(Integer)
+    mean:       Mapped[float] = mapped_column(Float)
+    m2:         Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[float] = mapped_column(Float)

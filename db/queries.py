@@ -8,12 +8,13 @@ import time
 from sqlalchemy import select
 
 from core.alerts.alert import Alert
-from db.models import AlertRecord, BlockedIp
+from db.models import AlertRecord, Baseline, BlockedIp
 
 
-def save_alert(session_factory, alert: Alert) -> None:
-    """Persists a single Alert as a row in the alerts table.
+def save_alert(session_factory, alert: Alert) -> int:
+    """Persists a single Alert as a row and returns its new id.
 
+    The id lets the dedup layer address this row later to bump its count.
     A fresh session per alert is fine: alerts are rare events, not per-packet,
     so the open/commit/close overhead is negligible.
     """
@@ -24,8 +25,30 @@ def save_alert(session_factory, alert: Alert) -> None:
             severity  = alert.severity,
             src_ip    = alert.src_ip,
             details   = alert.details,
+            last_seen = alert.timestamp,
+            score     = alert.score,
         )
         session.add(record)
+        session.commit()
+        return record.id
+
+
+def update_alert_repeat(session_factory, alert_id: int, count: int, score: int,
+                        deviation: float | None, now: float) -> None:
+    """Persist an episode's state after a repeat: count, score, deviation, last_seen.
+
+    Everything feeding the score is rewritten, or the row ends up showing a score
+    of 100 beside the stale deviation that plainly did not produce it. The
+    detector's own details stay as the episode opened. A missing row is a no-op.
+    """
+    with session_factory() as session:
+        record = session.get(AlertRecord, alert_id)
+        if record is None:
+            return
+        record.count     = count
+        record.score     = score
+        record.details   = {**record.details, "deviation": deviation}
+        record.last_seen = now
         session.commit()
 
 
@@ -96,3 +119,25 @@ def active_blocks(session_factory) -> list[BlockedIp]:
             .order_by(BlockedIp.blocked_at.desc())
         )
         return list(session.scalars(stmt).all())
+
+
+def save_baselines(session_factory, items: dict[str, tuple[int, float, float]],
+                   now: float | None = None) -> None:
+    """Upsert each source's Welford state (n, mean, m2), keyed by ip."""
+    if now is None:
+        now = time.time()
+    with session_factory() as session:
+        for ip, (n, mean, m2) in items.items():
+            record = session.get(Baseline, ip)
+            if record is None:
+                session.add(Baseline(ip=ip, n=n, mean=mean, m2=m2, updated_at=now))
+            else:
+                record.n, record.mean, record.m2, record.updated_at = n, mean, m2, now
+        session.commit()
+
+
+def load_baselines(session_factory) -> dict[str, tuple[int, float, float]]:
+    """Return every persisted baseline as ip -> (n, mean, m2)."""
+    with session_factory() as session:
+        rows = session.scalars(select(Baseline)).all()
+        return {r.ip: (r.n, r.mean, r.m2) for r in rows}

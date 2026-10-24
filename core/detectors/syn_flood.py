@@ -141,15 +141,15 @@ class SynFloodDetector:
             severity = "MEDIUM"
 
         if severity:
-            self._emit(dst_ip, severity, syn, ack, ratio)
+            self._emit(dst_ip, severity, syn, ack, ratio, now)
             self._cooldown.mark(dst_ip, now)
 
-    def _emit(self, dst_ip: str, severity: str, syn: int, ack: int, ratio: float) -> None:
+    def _emit(self, dst_ip: str, severity: str, syn: int, ack: int, ratio: float, now: float) -> None:
         self._alerts.put(Alert(
             type      = "SYN_FLOOD",
             severity  = severity,
             src_ip    = None,   # source is spoofed in a SYN flood – the target is what matters
-            timestamp = time.time(),
+            timestamp = now,
             details   = {
                 "dst_ip":    dst_ip,
                 "syn_count": syn,

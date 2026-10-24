@@ -1,6 +1,6 @@
 # SENTINEL IDS
 
-A real-time network intrusion detection system (IDS) that runs on Windows, listens to live network traffic, detects 5 types of cyber attacks, and presents everything through a dual tactical interface — a terminal UI and a web dashboard.
+A real-time network intrusion detection system (IDS) that runs on Windows, listens to live network traffic, detects 5 types of cyber attacks, learns each host's normal traffic to flag statistical anomalies, and presents everything through a dual tactical interface — a terminal UI and a web dashboard.
 
 ---
 
@@ -18,6 +18,14 @@ SENTINEL captures every packet that travels through the network and analyzes it 
 | 4 | DNS Anomaly | L7 – Application | DNS tunneling, high-frequency queries |
 | 5 | SYN Flood | L4 – Transport | Flood of half-open TCP connections |
 
+**Beyond fixed patterns (Phase 11):**
+
+- **Baseline anomaly detection** — a sixth detector learns each source IP's normal packet rate and flags a statistical spike (a z-score far past its *own* learned baseline), catching abnormal behaviour no fixed rule was written for. The learned baseline persists across restarts.
+- **Alert deduplication** — a storm of identical alerts collapses into a single entry with a live repeat counter, in both the terminal UI and the web dashboard.
+- **Threat scoring** — every alert carries a 0–100 score, so a HIGH from one detector can be ranked against a HIGH from another. It composes what the two features above already produce: how severe the detector called it, how often it has repeated (the dedup counter), and how far the source strays from its own learned baseline — then multiplies by a weight for the attack type, because an ARP spoof and a DNS oddity are not equally dangerous. The score **climbs while an attack is live**, since each repeat re-scores it.
+- **GeoIP** — an alert from a public address carries the country and city its source resolves to, shown in both interfaces. The lookup is local: a MaxMind GeoLite2 file, memory-mapped, so no query ever leaves the machine and an alert costs no network round-trip. It runs once per alert episode, not per packet — the source IP is part of the deduplication key, so an episode cannot change country.
+- **PCAP export** — when an alert episode opens, the source's recent traffic (every packet it sent or received) is written to `captures/` as a `.pcap` that Wireshark opens. An alert is always late — a scan is only called once enough ports have gone by — so the capture engine keeps the last 30 seconds of *raw* packets in a ring buffer, bounded by time and by count, and the alert looks backwards into it. A storm writes one file, not one per repeat, and the folder is capped so evidence cannot fill the disk. The dashboard names the file; the terminal marks the alert `pcap✓`.
+
 ---
 
 ## Architecture Overview
@@ -26,14 +34,15 @@ SENTINEL captures every packet that travels through the network and analyzes it 
 [Network Interface / PCAP File]
             ↓
     [Packet Capture Engine]        core/capture/engine.py
-            ↓
+            ↓          ↘
+            ↓           [Packet Ring]   core/capture/ring.py  (last 30s, raw – read by PCAP export)
        [Packet Parser]             core/capture/parser.py
             ↓
     [Thread-Safe Fan-Out Queue]    core/capture/queue.py
-     ↓     ↓     ↓     ↓     ↓
-  [Port] [ARP] [BF] [DNS] [SYN]   core/detectors/
-     ↓     ↓     ↓     ↓     ↓
-        [Alert Loop]               core/alerts/ + main.py
+     ↓    ↓    ↓    ↓    ↓    ↓
+ [Port][ARP][BF][DNS][SYN][Base]  core/detectors/   (Base = baseline anomaly)
+     ↓    ↓    ↓    ↓    ↓    ↓
+  [Alert Loop: Dedup → Score → Geo → PCAP]   core/alerts/ + main.py
          ↓           ↓
    [Terminal UI]  [Web Dashboard]  ui/tui/  ui/web/
          ↓
@@ -54,27 +63,33 @@ sentinel/
 │   ├── capture/                 # Packet ingestion pipeline
 │   │   ├── engine.py            # Listens to a NIC (live) or replays a PCAP file
 │   │   ├── parser.py            # Breaks a raw Scapy packet into clean, flat fields
-│   │   └── queue.py             # Fan-out queue – sends each packet to all detectors
+│   │   ├── queue.py             # Fan-out queue – sends each packet to all detectors
+│   │   └── ring.py              # (Phase 11) the last 30s of raw packets, for evidence capture
 │   ├── detectors/               # One file per attack type
 │   │   ├── port_scan.py
 │   │   ├── arp_spoof.py
 │   │   ├── brute_force.py
 │   │   ├── dns_anomaly.py
-│   │   └── syn_flood.py
+│   │   ├── syn_flood.py
+│   │   └── baseline.py          # (Phase 11) per-IP statistical anomaly detector
 │   ├── utils/                   # Shared detection primitives
 │   │   ├── sliding_window.py    # Time-bounded O(1) event counter + idle-window sweep
-│   │   └── cooldown.py          # Per-key alert suppression (anti-storm)
-│   ├── alerts/                  # Alert data
+│   │   ├── cooldown.py          # Per-key alert suppression (anti-storm)
+│   │   └── welford.py           # (Phase 11) online mean/variance for baselines
+│   ├── alerts/                  # Alert data + deduplication + scoring + geo + evidence
 │   │   ├── alert.py             # The Alert dataclass passed on the queue
-│   │   └── scoring.py           # (planned, Phase 11) Threat scoring engine (0–100)
+│   │   ├── deduplicator.py      # (Phase 11) collapses repeat alerts into one + counter
+│   │   ├── scoring.py           # (Phase 11) ThreatScorer – ranks an alert 0–100
+│   │   ├── geoip.py             # (Phase 11) GeoIPResolver – public IP → country/city
+│   │   └── pcap_export.py       # (Phase 11) PcapExporter – an alert's traffic → .pcap
 │   └── response/                # Block/unblock actions (Phase 10)
 │       ├── engine.py            # Policy brain – confirm, whitelist, record to DB
 │       └── firewall.py          # Adds/removes Windows Firewall rules via netsh
 │
 ├── db/                          # Data persistence layer
 │   ├── database.py              # SQLAlchemy engine + Base + init_db()
-│   ├── models.py                # Tables: alerts, blocked_ips
-│   └── queries.py               # save_alert, alerts_since, block/unblock/is_blocked
+│   ├── models.py                # Tables: alerts, blocked_ips, baselines
+│   └── queries.py               # save_alert, update_alert_repeat, alerts_since, save/load_baselines, block/unblock
 │
 ├── ui/
 │   ├── tui/                     # Terminal UI (Textual framework) – primary interface
@@ -89,17 +104,19 @@ sentinel/
 ├── config/
 │   └── config.yaml              # All tunable thresholds – no hardcoded values in code
 │
-├── scripts/                     # Attack simulation scripts (Scapy loopback, no VMs)
-│   ├── sim_port_scan.py
-│   ├── sim_arp_spoof.py
-│   ├── sim_brute_force.py
-│   ├── sim_dns_tunnel.py
-│   └── sim_syn_flood.py
+├── data/                        # GeoLite2 database – downloaded by hand, not in the repo
+├── captures/                    # Evidence .pcap files, written at runtime – not in the repo
+│
+├── scripts/                     # Runnable demos (Scapy attack sims are Phase 12)
+│   ├── demo_baseline.py         # (Phase 11) watch the baseline fire in the TUI, no capture
+│   ├── demo_scoring.py          # (Phase 11) watch a threat score climb live, no capture
+│   ├── demo_geoip.py            # (Phase 11) five sources, five different geo answers
+│   └── demo_pcap.py             # (Phase 11) alerts that write their own evidence files
 │
 ├── pcap_samples/                # Pre-recorded attack traffic for offline replay
 │
-├── tests/                       # 88 pytest tests – utils, parser, detectors, db, response
-│   └── conftest.py              # Shared fixtures (fresh per-test file DB)
+├── tests/                       # 202 pytest tests – utils, parser, detectors, dedup, baseline, scoring, geoip, pcap, db, response
+│   └── conftest.py              # Shared fixtures (fresh per-test file DB, scorer from config)
 ├── docs/                        # (planned, Phase 13) ADRs, THREAT_MODEL.md, BENCHMARKS.md
 │
 ├── main.py                      # Entry point – starts the full system
@@ -132,7 +149,7 @@ sentinel/
 Scapy gives direct access to every byte of every packet. We parse IP headers, TCP flags, and DNS payloads ourselves.
 
 **Why a fan-out queue?**
-The capture engine runs in one thread. Each of the 5 detectors runs in its own thread. A fan-out queue lets every detector see every packet in parallel without blocking each other. If a detector is slow, it drops packets from its own queue — the other detectors are unaffected.
+The capture engine runs in one thread. Each of the 6 detectors runs in its own thread. A fan-out queue lets every detector see every packet in parallel without blocking each other. If a detector is slow, it drops packets from its own queue — the other detectors are unaffected.
 
 **Why configuration in YAML and not hardcoded?**
 Every detection threshold (e.g., "more than 15 ports in 5 seconds = port scan") lives in `config/config.yaml`. Changing sensitivity requires editing one file, not hunting through code. This is a production pattern from The Twelve-Factor App methodology.
@@ -149,9 +166,9 @@ Running three virtual machines (Kali, Ubuntu, Windows) simultaneously is too res
 
 | Layer | Method |
 |-------|--------|
-| Unit tests | 88 `pytest` tests across the utils, parser, all 5 detectors, the DB layer, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~1s: `python -m pytest` |
+| Unit tests | 202 `pytest` tests across the utils (including Welford), parser, all 6 detectors, alert deduplication, threat scoring, geo resolution, the packet ring and PCAP export, the DB layer, the firewall, and the response engine. Time is injected (no `sleep`s), so they are deterministic and run in ~4s: `python -m pytest`. The GeoIP tests drive a fake reader, so the suite is green on a clone that never downloaded the 63MB database; the PCAP tests write real packets and read the file back with `rdpcap`, as Wireshark would |
 | Development | Replay pre-recorded PCAP files with `rdpcap()` – exact repeatability for debugging |
-| Demo & live | Scapy loopback scripts (`scripts/sim_*.py`) craft and send fake attack packets over the local interface – no VMs required |
+| Demo & live | `scripts/demo_scoring.py`, `scripts/demo_baseline.py`, `scripts/demo_geoip.py` and `scripts/demo_pcap.py` feed synthetic traffic through the real pipeline into the TUI – watch a score climb, the baseline fire, five sources resolve to five different places, or alerts write their own evidence files, with no VMs and no Npcap. Scapy loopback attack scripts are planned for Phase 12 |
 
 ---
 
@@ -174,6 +191,10 @@ python -m pytest
 
 > Npcap must be installed for live capture. Download from https://npcap.com
 
+**Optional – GeoIP.** The GeoLite2 database is a 63MB binary and is not committed. Without it the system runs exactly as before, and alerts simply carry no location. To enable it, take the free `GeoLite2-City.mmdb` from [MaxMind](https://dev.maxmind.com/geoip/geolite2-free-geolocation-data) and drop it in `data/`; the path is `alerts.geoip.database_path` in `config/config.yaml`.
+
+**Evidence files.** Every alert episode with a known source writes that source's last 30 seconds of traffic to `captures/` (gitignored, capped at 50 files). Open one in Wireshark, or read it with `tshark -r <file>`. The buffer size, the ceilings and the folder are under `alerts.pcap` in `config/config.yaml`.
+
 ---
 
 ## Project Status
@@ -191,12 +212,14 @@ python -m pytest
 | 8 | SYN flood detector | ✅ Done – v0.8.0 |
 | 9 | Web dashboard | ✅ Done – v0.9.0 |
 | 10 | Response engine | ✅ Done – v0.10.0 |
-| 11 | Advanced features | 🔜 Next |
+| 11 | Advanced features | ✅ Done – v0.11.0 |
 | 12 | Demo scenarios | ⬜ Pending |
 | 13 | Portfolio polish | ⬜ Pending |
 
 > ✅ **Test suite (v0.10.1) and audit round (v0.10.2):** after Phase 10 the project gained a committed suite of **88 `pytest` tests**, then a hardening round that fixed a SYN-flood alert-persistence crash, bounded detector memory against spoofed-source floods, made SYN-flood detection work under PCAP replay, and hardened the response layer (unblock symmetry, netsh timeout). Both shipped between Phase 10 and Phase 11.
 
-> 🟡 **Phase 5 is partial:** the `alerts` table is live (write + read), and `blocked_ips` was added with the Response Engine (Phase 10). The `packets` and `baselines` tables, retention cleanup, and built-in stat queries are still deferred — each consumer pulls in what it needs, when it needs it, rather than creating empty tables up front.
+> ✅ **Phase 11 (v0.11.0):** all five advanced features are done. **Alert deduplication** collapses a storm of identical alerts into one entry with a live repeat counter (closing two alert-storm bugs deferred from the audit). **Baseline learning** adds a sixth detector that learns each host's normal packet rate with an online Welford mean/variance and flags a z-score spike past its *own* baseline, with the learned state persisted across restarts. **Threat scoring** composes both into a 0–100 rank per alert — severity, repeat count and baseline deviation are summed as evidence, then multiplied by a weight for the attack type — so alerts of different types can be compared and a live attack's score climbs as it repeats. **GeoIP** resolves a public source to a country and city from a local MaxMind database, once per alert episode, and shows it in both interfaces. **PCAP export** keeps the last 30 seconds of raw packets in a bounded ring and, when an episode opens, writes the source's traffic to a `.pcap` – the evidence behind the alert, ready for Wireshark.
+
+> 🟡 **Phase 5 is partial:** the `alerts` table is live (write + read), `blocked_ips` arrived with the Response Engine (Phase 10), and `baselines` arrived with Phase 11 baseline learning. The `packets` table, retention cleanup, and built-in stat queries are still deferred — each consumer pulls in what it needs, when it needs it, rather than creating empty tables up front.
 
 > 📌 **Build order vs. phase numbers:** the table follows the *plan's* phase numbers, not the order the work actually happened. The detection engine was the priority, so all five detectors (Phases 4, 6, 7, 8) were built and validated first — before the terminal UI (Phase 3) and the persistence layer (Phase 5). This is why the **early** Git tags are not chronological: `v0.3.0` (TUI) and `v0.5.0` (DB) sit later in history than the detector tags around them. From `v0.9.0` onward the tags are chronological. Each early tag is numbered after its **plan phase**, not its release date.

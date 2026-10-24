@@ -32,7 +32,7 @@ StatsBar Static {
 }
 
 PacketLog {
-    width: 2fr;
+    width: 1fr;
     border: solid #1a3a5c;
     border-title-color: #4a9eff;
     border-title-style: bold;
