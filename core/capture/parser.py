@@ -30,7 +30,10 @@ class PacketParser:
 
     def _base(self, packet) -> dict:
         return {
-            "timestamp": getattr(packet, "time", time.time()),
+            # Scapy stamps a sniffed packet with a float but a packet read from a
+            # capture file with an EDecimal, which datetime refuses; converting
+            # here keeps a replay indistinguishable from live capture downstream.
+            "timestamp": float(getattr(packet, "time", time.time())),
             "size":      len(packet),
             "src_mac":   None,
             "dst_mac":   None,
