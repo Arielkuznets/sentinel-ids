@@ -86,7 +86,7 @@ def main() -> None:
     threading.Thread(
         target=_alert_loop,
         args=(alert_queue, session_factory, deduper, scorer, detector.deviation_for,
-              geoip.lookup, app),
+              geoip.lookup, lambda alert: None, app),
         daemon=True,
     ).start()
     detector.start()

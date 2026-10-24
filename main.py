@@ -6,10 +6,12 @@ import yaml
 from core.alerts.alert import Alert
 from core.alerts.deduplicator import Deduplicator
 from core.alerts.geoip import GeoIPResolver
+from core.alerts.pcap_export import PcapExporter
 from core.alerts.scoring import ThreatScorer
 from core.capture.engine import PacketCapture
 from core.capture.parser import PacketParser
 from core.capture.queue import PacketQueue
+from core.capture.ring import PacketRing
 from core.detectors.baseline import BaselineDetector
 from core.detectors.arp_spoof import ArpSpoofDetector
 from core.detectors.brute_force import BruteForceDetector
@@ -30,17 +32,19 @@ def _load_config(path: str = "config/config.yaml") -> dict:
 
 
 def _handle_alert(alert: Alert, session_factory, deduper: Deduplicator,
-                  scorer: ThreatScorer, deviation_for, geo_for, app: SentinelApp) -> None:
-    """Route one alert through dedup, scoring and locating it on the way.
+                  scorer: ThreatScorer, deviation_for, geo_for, pcap_for,
+                  app: SentinelApp) -> None:
+    """Route one alert through dedup, scoring, locating and capturing it on the way.
 
     A new episode is persisted and shown, a repeat only bumps the stored count –
     so a storm becomes one row, not thousands. Scoring runs after dedup, never
     before, because the repeat count is one of the score's three inputs: a repeat
     re-scores higher than the first sighting did, and that is how a live attack's
-    score climbs. The location is looked up once per episode: src_ip is part of
-    the dedup key, so an episode cannot change country. deviation_for and geo_for
-    are plain callables, so this loop stays free of both the detector and the
-    GeoIP database.
+    score climbs. Location and capture happen once per episode, on the new branch:
+    src_ip is part of the dedup key, so an episode cannot change country, and a
+    storm must leave one pcap, not thousands. deviation_for, geo_for and pcap_for
+    are plain callables, so this loop stays free of the detector, the GeoIP
+    database and the packet ring alike.
     """
     decision  = deduper.process(alert)
     deviation = deviation_for(alert.src_ip, alert.timestamp)
@@ -49,7 +53,8 @@ def _handle_alert(alert: Alert, session_factory, deduper: Deduplicator,
     alert.score = scorer.score(alert, decision.count, deviation)
 
     if decision.is_new:
-        alert.details["geo"] = geo_for(alert.src_ip)
+        alert.details["geo"]  = geo_for(alert.src_ip)
+        alert.details["pcap"] = pcap_for(alert)
         row_id = save_alert(session_factory, alert)
         deduper.attach_row_id(alert, row_id)
         app.call_from_thread(app.push_alert, alert)
@@ -60,7 +65,7 @@ def _handle_alert(alert: Alert, session_factory, deduper: Deduplicator,
 
 
 def _alert_loop(alert_queue: queue.Queue, session_factory, deduper: Deduplicator,
-                scorer: ThreatScorer, deviation_for, geo_for, app: SentinelApp) -> None:
+                scorer: ThreatScorer, deviation_for, geo_for, pcap_for, app: SentinelApp) -> None:
     """Consume the alert queue, handling each alert in isolation.
 
     A failure on one alert (a transient DB error, an unexpected payload) is
@@ -73,7 +78,8 @@ def _alert_loop(alert_queue: queue.Queue, session_factory, deduper: Deduplicator
         except queue.Empty:
             continue
         try:
-            _handle_alert(alert, session_factory, deduper, scorer, deviation_for, geo_for, app)
+            _handle_alert(alert, session_factory, deduper, scorer, deviation_for,
+                          geo_for, pcap_for, app)
         except Exception as exc:
             try:
                 app.call_from_thread(app.notify, f"Alert error: {exc}", severity="error")
@@ -99,8 +105,14 @@ def main() -> None:
     scorer      = ThreatScorer(**config["alerts"]["scoring"])
     geoip       = GeoIPResolver.from_path(config["alerts"]["geoip"]["database_path"])
 
+    pcap_cfg    = config["alerts"]["pcap"]
+    ring        = PacketRing(window_seconds = pcap_cfg["buffer_seconds"],
+                             max_packets    = pcap_cfg["max_packets"])
+    exporter    = PcapExporter(ring, output_dir=pcap_cfg["output_dir"],
+                               max_files=pcap_cfg["max_files"])
+
     consumer    = pkt_queue.subscribe()
-    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue)
+    capture     = PacketCapture(interface=interface, parser=parser, queue=pkt_queue, ring=ring)
     ps_cfg      = config["detectors"]["port_scan"]
     ps_detector = PortScanDetector(
         pkt_queue.subscribe(),
@@ -202,7 +214,7 @@ def main() -> None:
     threading.Thread(
         target=_alert_loop,
         args=(alert_queue, SessionLocal, deduper, scorer, base_detector.deviation_for,
-              geoip.lookup, app),
+              geoip.lookup, exporter.export, app),
         daemon=True,
     ).start()
 

@@ -69,6 +69,12 @@ function locationText(geo) {
     return geo.city ? `${place} · ${geo.city}` : place;
 }
 
+function pcapText(details) {
+    const path = details && details.pcap;
+    if (!path) return "";
+    return "⬇ " + path.split(/[\\/]/).pop();   // the filename alone, not the path
+}
+
 function paintScore(el, msg) {
     el.textContent = msg.score;
     el.dataset.level = msg.score_level;   // the band the server resolved; drives the colour
@@ -98,6 +104,7 @@ function renderAlert(msg) {
         cell("alert-geo", locationText(msg.details && msg.details.geo)),
         cell("alert-sev", msg.severity),
         cell("alert-count", countText(msg.count)),
+        cell("alert-pcap", pcapText(msg.details)),
     );
 
     listEl.prepend(li);                  // newest on top

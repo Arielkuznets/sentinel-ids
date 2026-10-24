@@ -89,4 +89,23 @@ def test_the_location_is_not_dumped_raw_beside_the_detector_details():
     geo  = {"country": "Russia", "iso": "RU", "city": "Moscow"}
     line = format_alert_line(_alert(score=63, mac="aa:bb:cc", geo=geo), count=1)
     assert "geo=" not in line
+
+
+def test_a_captured_alert_shows_a_pcap_marker():
+    line = format_alert_line(_alert(score=63, pcap="captures/20260715_x_PORT_SCAN_1.1.1.1.pcap"), count=1)
+    assert "pcap✓" in line
+
+
+def test_an_alert_without_a_pcap_shows_no_marker():
+    # No traffic captured (a replay, or an attack faster than the window) - and
+    # the marker claims evidence, so it must be absent when there is none.
+    line = format_alert_line(_alert(score=63, pcap=None), count=1)
+    assert "pcap" not in line
+
+
+def test_the_pcap_path_is_a_marker_not_a_raw_dump():
+    line = format_alert_line(_alert(score=63, mac="aa:bb:cc", pcap="captures/x.pcap"), count=1)
+    assert "pcap✓" in line
+    assert "pcap=" not in line
+    assert "captures/" not in line
     assert "mac=aa:bb:cc" in line

@@ -102,7 +102,7 @@ def main() -> None:
     threading.Thread(
         target=_alert_loop,
         args=(alert_queue, session_factory, deduper, scorer, lambda ip, now: None,
-              geoip.lookup, app),
+              geoip.lookup, lambda alert: None, app),
         daemon=True,
     ).start()
     detector.start()
