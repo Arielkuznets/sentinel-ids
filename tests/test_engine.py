@@ -123,3 +123,14 @@ def test_start_plays_the_replay_file_on_the_capture_thread(tmp_path):
     capture._thread.join(timeout=5)
 
     assert len(_drain(consumer)) == 2
+
+
+def test_the_capture_counts_every_packet_it_hands_on():
+    # The TUI header shows this count, not its own: the packet log keeps up with
+    # a fraction of a busy network, and its tally would undercount the capture.
+    capture = _capture()
+
+    for port in range(5):
+        capture._handle_packet(_syn(port=port))
+
+    assert capture.packets_seen == 5

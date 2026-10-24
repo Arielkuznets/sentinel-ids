@@ -32,6 +32,7 @@ class PacketCapture:
         self._ring = ring
         self._replay_path = replay_path
         self._replay_speed = replay_speed
+        self._seen = 0
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
@@ -58,6 +59,15 @@ class PacketCapture:
     def is_running(self) -> bool:
         """Returns True if the capture thread is currently active."""
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def packets_seen(self) -> int:
+        """Every packet that entered the pipeline - what any one consumer kept may be less.
+
+        Only the capture thread writes it, and an int read is atomic in CPython,
+        so the UI can poll it from its own thread without a lock.
+        """
+        return self._seen
 
     def replay_pcap(self, path: str, speed: float = 0.0) -> None:
         """Push every packet of a capture file through the pipeline, in order.
@@ -95,6 +105,7 @@ class PacketCapture:
         )
 
     def _handle_packet(self, raw_packet) -> None:
+        self._seen += 1
         # parse() always returns a dict - no None to guard against.
         parsed = self._parser.parse(raw_packet)
         if self._ring is not None:

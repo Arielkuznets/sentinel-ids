@@ -236,6 +236,7 @@ def main(argv: list[str] | None = None) -> None:
         score_high   = ui_cfg["score_high"],
         score_medium = ui_cfg["score_medium"],
         dashboard    = dashboard,
+        packets_seen = lambda: capture.packets_seen,
     )
     # The header says which source is feeding everything below it.
     app.sub_title = (f"replay · {Path(args.replay).name}" if args.replay
