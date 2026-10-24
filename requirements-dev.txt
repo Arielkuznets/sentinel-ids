@@ -2,3 +2,4 @@
 
 # Testing
 pytest>=8.0
+httpx2>=2.16         # FastAPI's TestClient drives the web app in-process
