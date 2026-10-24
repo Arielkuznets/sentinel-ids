@@ -56,6 +56,8 @@ seventeen seconds. Nine alert episodes land in **Active Alerts**:
 The clock column shows the capture's own time (2026-01-01 00:00 UTC, in your local
 time zone), not the wall clock: every window in SENTINEL runs on packet time.
 
+![Scenario 1, from the first alert to the ninth](docs/screenshots/demo.gif)
+
 What to point at:
 
 - **The score beside the severity.** Six alerts say HIGH; the score ranks them – an
