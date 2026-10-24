@@ -55,7 +55,7 @@ body {
 }
 
 .metric { color: var(--text-dim); }
-.metric #alert-count { color: var(--text); font-weight: 700; }
+.metric #alert-count, .metric #packet-rate { color: var(--text); font-weight: 700; }
 
 /* connection indicator: red when offline, teal when live */
 #connection-status { font-weight: 700; letter-spacing: 1px; }
@@ -65,10 +65,29 @@ body {
 .layout {
     flex: 1;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
     gap: 16px;
     padding: 16px;
     min-height: 0;            /* lets the alert list scroll inside the grid cell */
+}
+
+/* the right-hand column: traffic across the top, four small panels below it */
+.side {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    min-height: 0;
+}
+
+.side .wide { grid-column: span 2; }
+
+/* Chart.js sizes a responsive chart from its parent, so the box has to be
+   relative and allowed to shrink - otherwise each redraw grows the grid row. */
+.chart-box {
+    position: relative;
+    flex: 1;
+    min-height: 0;
 }
 
 .panel {
@@ -139,4 +158,50 @@ body {
     to   { opacity: 1; transform: translateY(0); }
 }
 
-.chart-panel canvas { max-height: 100%; }
+.panel h2 .window { color: var(--text-dim); opacity: 0.6; letter-spacing: 1px; }
+
+.filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.filters select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: inherit;
+    font-size: 12px;
+}
+
+.side-list {
+    list-style: none;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+/* a scrollbar in the theme's colours, not the browser's white default */
+.alert-list, .side-list {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+}
+
+.side-list li {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    column-gap: 8px;
+    row-gap: 3px;
+}
+
+.talker-ip    { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talker-count { color: var(--text-dim); text-align: right; }
+.talker-bar   { grid-column: span 2; height: 3px; background: var(--accent); border-radius: 2px; }
+
+.blocked-ip   { color: var(--high); font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+.blocked-meta { grid-column: span 2; color: var(--text-dim); font-size: 12px; }
+.empty        { color: var(--text-dim); font-size: 12px; }

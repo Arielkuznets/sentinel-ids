@@ -6,6 +6,7 @@ from textual.widgets import Header, Footer
 
 from core.alerts.alert import Alert
 from core.alerts.deduplicator import dedup_key
+from ui.tui.dashboard import DashboardLauncher
 from ui.tui.widgets.stats_bar import StatsBar
 from ui.tui.widgets.packet_log import PacketLog
 from ui.tui.widgets.alert_panel import AlertPanel
@@ -24,16 +25,19 @@ class SentinelApp(App):
         ("f", "toggle_filter", "Filter"),
         ("b", "block_last",    "Block IP"),
         ("u", "unblock_last",  "Unblock IP"),
+        ("d", "open_dashboard", "Dashboard"),
     ]
 
     def __init__(self, packet_queue: queue.Queue, session_factory, response_engine,
-                 score_high: int = 70, score_medium: int = 40):
+                 score_high: int = 70, score_medium: int = 40,
+                 dashboard: DashboardLauncher | None = None):
         super().__init__()
         self._packet_queue    = packet_queue
         self._session_factory = session_factory
         self._response_engine = response_engine
         self._score_high      = score_high
         self._score_medium    = score_medium
+        self._dashboard       = dashboard
         self._packet_count    = 0
         self._alert_count     = 0
         self._last_alert: Alert | None = None   # the IP that 'b' will act on
@@ -122,6 +126,21 @@ class SentinelApp(App):
             return
         result = self._response_engine.unblock(self._last_alert.src_ip)
         self.notify(result.message, severity="information" if result.ok else "warning")
+
+    def action_open_dashboard(self) -> None:
+        """Open the web dashboard, starting its server first if none is running.
+
+        Bringing a server up takes a moment, so the wait runs on a worker thread
+        and the terminal keeps drawing meanwhile.
+        """
+        if self._dashboard is None:
+            self.notify("No dashboard in this mode", severity="warning")
+            return
+        self.notify(f"Opening the dashboard at {self._dashboard.url} ...")
+        self.run_worker(self._open_dashboard, thread=True, group="dashboard")
+
+    def _open_dashboard(self) -> None:
+        self.call_from_thread(self.notify, self._dashboard.open())
 
     def action_quit(self) -> None:
         self.exit()

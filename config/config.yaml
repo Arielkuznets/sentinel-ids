@@ -75,12 +75,18 @@ network:
 ui:
   score_high: 70
   score_medium: 40
+  dashboard_startup_seconds: 10   # how long 'd' waits for a dashboard it started to listen
 
 web:
   host: 127.0.0.1
   port: 8888
   poll_seconds: 1
   alert_history_seconds: 3600
+  traffic_seconds: 120       # the traffic chart's span, one point per second
+  top_sources: 5             # how many talkers the dashboard ranks...
+  top_sources_seconds: 300   # ...by packets sent over this window
+  alert_stats_hours: 24      # span of the per-hour and per-type alert charts
+  incident_limit: 100        # most rows one incident-log query returns
 
 response:
   direction: in          # in / out / both – which way to drop the blocked IP's traffic
