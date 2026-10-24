@@ -65,6 +65,9 @@ alerts:
 database:
   path: sentinel.db
   packet_retention_hours: 48
+  packet_batch_size: 500     # rows per transaction when the packet log is busy...
+  packet_flush_seconds: 1    # ...and the longest a quiet packet waits to be written
+  packet_cleanup_seconds: 60 # how often (packet time) the retention delete runs
 
 network:
   interface: auto

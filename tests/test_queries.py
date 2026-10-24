@@ -4,18 +4,37 @@ Each test runs against a fresh, file-backed SQLite database provided by the
 `session_factory` fixture, so tests are fully isolated. The queries take `now`
 explicitly, so time-based filtering is deterministic.
 """
+from sqlalchemy import select
+
 from core.alerts.alert import Alert
+from db.models import PacketRecord
 from db.queries import (
     active_blocks,
     alerts_since,
+    delete_packets_before,
     is_blocked,
     load_baselines,
     record_block,
     record_unblock,
     save_alert,
     save_baselines,
+    save_packets,
     update_alert_repeat,
 )
+
+
+def _packet(ts: float, src: str = "10.0.0.5", **fields) -> dict:
+    """A parsed packet as PacketParser emits it, payload and MACs included."""
+    return {"timestamp": ts, "size": 60, "src_mac": "aa:aa", "dst_mac": "bb:bb",
+            "src_ip": src, "dst_ip": "10.0.0.9", "ttl": 64, "protocol": "TCP",
+            "src_port": 51000, "dst_port": 443, "flags": "S", "seq": 1,
+            "payload": b"secret", "arp_op": None, "dns_qname": None,
+            "dns_qtype": None, **fields}
+
+
+def _stored_packets(session_factory) -> list[PacketRecord]:
+    with session_factory() as session:
+        return list(session.scalars(select(PacketRecord).order_by(PacketRecord.timestamp)))
 
 
 def test_save_alert_and_query_back(session_factory):
@@ -158,3 +177,47 @@ def test_save_baselines_upserts_existing_ip(session_factory):
 
 def test_load_baselines_empty_is_empty_dict(session_factory):
     assert load_baselines(session_factory) == {}
+
+
+def test_save_packets_writes_the_whole_batch(session_factory):
+    save_packets(session_factory, [_packet(1000.0 + i) for i in range(50)])
+
+    rows = _stored_packets(session_factory)
+    assert len(rows) == 50
+    assert rows[0].timestamp == 1000.0
+    assert (rows[0].src_ip, rows[0].dst_port, rows[0].flags) == ("10.0.0.5", 443, "S")
+
+
+def test_save_packets_keeps_header_fields_never_the_payload(session_factory):
+    # The packets table answers "how much, from whom" - the bytes belong to the
+    # ring and the pcap evidence, and keeping them here would bloat every row.
+    save_packets(session_factory, [_packet(1000.0)])
+
+    row = _stored_packets(session_factory)[0]
+    assert not hasattr(row, "payload")
+    assert row.size == 60
+
+
+def test_save_packets_accepts_a_packet_without_ports(session_factory):
+    # ARP has no transport layer; its ports and flags arrive as None.
+    arp = _packet(1000.0, src="10.0.0.1", protocol="ARP", src_port=None,
+                  dst_port=None, flags=None, arp_op=2)
+    save_packets(session_factory, [arp])
+
+    row = _stored_packets(session_factory)[0]
+    assert row.protocol == "ARP"
+    assert row.dst_port is None
+
+
+def test_save_packets_with_an_empty_batch_is_a_noop(session_factory):
+    save_packets(session_factory, [])
+    assert _stored_packets(session_factory) == []
+
+
+def test_delete_packets_before_keeps_the_retention_window(session_factory):
+    save_packets(session_factory, [_packet(ts) for ts in (1000.0, 2000.0, 3000.0)])
+
+    removed = delete_packets_before(session_factory, cutoff=2000.0)
+
+    assert removed == 1                                       # only t=1000 is older
+    assert [r.timestamp for r in _stored_packets(session_factory)] == [2000.0, 3000.0]

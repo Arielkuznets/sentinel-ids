@@ -5,10 +5,14 @@ logic has one home and main.py stays a thin assembly layer.
 """
 import time
 
-from sqlalchemy import select
+from sqlalchemy import delete, insert, select
 
 from core.alerts.alert import Alert
-from db.models import AlertRecord, Baseline, BlockedIp
+from db.models import AlertRecord, Baseline, BlockedIp, PacketRecord
+
+# The parsed-packet fields that become a packets row; payload and MACs stay out.
+_PACKET_FIELDS = ("timestamp", "src_ip", "dst_ip", "protocol", "size",
+                  "src_port", "dst_port", "flags")
 
 
 def save_alert(session_factory, alert: Alert) -> int:
@@ -141,3 +145,29 @@ def load_baselines(session_factory) -> dict[str, tuple[int, float, float]]:
     with session_factory() as session:
         rows = session.scalars(select(Baseline)).all()
         return {r.ip: (r.n, r.mean, r.m2) for r in rows}
+
+
+def save_packets(session_factory, packets: list[dict]) -> None:
+    """Insert a batch of parsed packets as rows, in one transaction.
+
+    Packets are not rare the way alerts are: a commit per packet would pay a full
+    transaction per packet, while one executemany per batch pays it once.
+    """
+    if not packets:
+        return
+    rows = [{field: packet.get(field) for field in _PACKET_FIELDS} for packet in packets]
+    with session_factory() as session:
+        session.execute(insert(PacketRecord), rows)
+        session.commit()
+
+
+def delete_packets_before(session_factory, cutoff: float) -> int:
+    """Delete every packet older than `cutoff` and return how many went.
+
+    The range rides the index that leads with timestamp, so trimming the oldest
+    rows stays cheap however large the table has grown.
+    """
+    with session_factory() as session:
+        result = session.execute(delete(PacketRecord).where(PacketRecord.timestamp < cutoff))
+        session.commit()
+        return result.rowcount

@@ -1,6 +1,8 @@
 import queue
 import signal
 import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import yaml
 
 from core.alerts.alert import Alert
@@ -11,6 +13,7 @@ from core.alerts.scoring import ThreatScorer
 from core.capture.engine import PacketCapture
 from core.capture.parser import PacketParser
 from core.capture.queue import PacketQueue
+from core.capture.recorder import PacketRecorder
 from core.capture.ring import PacketRing
 from core.detectors.baseline import BaselineDetector
 from core.detectors.arp_spoof import ArpSpoofDetector
@@ -87,6 +90,16 @@ def _alert_loop(alert_queue: queue.Queue, session_factory, deduper: Deduplicator
                 pass
 
 
+def _stop_all(components: list) -> None:
+    """Stop every component at once.
+
+    A consumer's stop() waits up to a second for its thread to wake from the
+    queue and notice; stopping eight of them one by one would add those waits up.
+    """
+    with ThreadPoolExecutor(max_workers=len(components)) as pool:
+        list(pool.map(lambda component: component.stop(), components))
+
+
 def main() -> None:
     config    = _load_config()
     interface = config["network"]["interface"]
@@ -94,8 +107,8 @@ def main() -> None:
         interface = None
 
     # Persistence – build the DB and a session factory from config
-    db_path      = config["database"]["path"]
-    SessionLocal = init_db(db_path)
+    db_cfg       = config["database"]
+    SessionLocal = init_db(db_cfg["path"])
 
     # Dependency Injection & Pipeline Assembly
     parser      = PacketParser()
@@ -178,6 +191,15 @@ def main() -> None:
         session_factory           = SessionLocal,
     )
 
+    recorder = PacketRecorder(
+        pkt_queue.subscribe(),
+        SessionLocal,
+        batch_size      = db_cfg["packet_batch_size"],
+        flush_seconds   = db_cfg["packet_flush_seconds"],
+        retention_hours = db_cfg["packet_retention_hours"],
+        cleanup_seconds = db_cfg["packet_cleanup_seconds"],
+    )
+
     resp_cfg        = config["response"]
     firewall        = FirewallManager(direction=resp_cfg["direction"])
     response_engine = ResponseEngine(firewall, SessionLocal, whitelist=resp_cfg["whitelist"])
@@ -191,25 +213,15 @@ def main() -> None:
         score_medium = ui_cfg["score_medium"],
     )
 
-    def _shutdown(sig, frame):
-        capture.stop()
-        ps_detector.stop()
-        arp_detector.stop()
-        bf_detector.stop()
-        dns_detector.stop()
-        syn_detector.stop()
-        base_detector.stop()
-        app.exit()
+    pipeline = [capture, ps_detector, arp_detector, bf_detector,
+                dns_detector, syn_detector, base_detector, recorder]
 
-    signal.signal(signal.SIGINT, _shutdown)
+    # Ctrl+C only asks the UI to close; the pipeline stops below, on the one path
+    # every exit takes.
+    signal.signal(signal.SIGINT, lambda sig, frame: app.exit())
 
-    capture.start()
-    ps_detector.start()
-    arp_detector.start()
-    bf_detector.start()
-    dns_detector.start()
-    syn_detector.start()
-    base_detector.start()
+    for component in pipeline:
+        component.start()
 
     threading.Thread(
         target=_alert_loop,
@@ -218,7 +230,12 @@ def main() -> None:
         daemon=True,
     ).start()
 
-    app.run()
+    try:
+        app.run()
+    finally:
+        # q, Ctrl+C or a crash in the UI - every way out stops the pipeline, so the
+        # baseline and the packet log write what they hold before the process ends.
+        _stop_all(pipeline)
 
 
 if __name__ == "__main__":
