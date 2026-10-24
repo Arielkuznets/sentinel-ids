@@ -96,8 +96,7 @@ class SynFloodDetector:
         elif flags == _ACK:
             self._add(dst_ip, _ACK, now)
 
-        # Evaluate once per window, not per SYN (a premature MEDIUM would lock the
-        # cooldown before HIGH is reachable), and on packet time not wall-clock so
+        # Evaluate once per window, not per SYN, and on packet time not wall-clock so
         # "window" means seconds of traffic in both live capture and PCAP replay.
         if self._last_eval is None:
             self._last_eval = now
@@ -124,9 +123,6 @@ class SynFloodDetector:
             self._evaluate(dst_ip, window, now)
 
     def _evaluate(self, dst_ip: str, window: SlidingWindow, now: float) -> None:
-        if self._cooldown.is_cooling(dst_ip, now):
-            return
-
         syn = window.count(_SYN)
         if syn < self._min_syn:
             return
@@ -139,10 +135,18 @@ class SynFloodDetector:
             severity = "HIGH"
         elif ratio > self._ratio_medium:
             severity = "MEDIUM"
+        if severity is None:
+            return
 
-        if severity:
-            self._emit(dst_ip, severity, syn, ack, ratio, now)
-            self._cooldown.mark(dst_ip, now)
+        # Cooling per (target, severity), not per target: where a judgement lands
+        # in a flood's ramp depends on whatever other TCP traffic closes windows,
+        # and a flood judged early reads MEDIUM. It must still be able to escalate
+        # to HIGH a window later, not sit at MEDIUM for the whole cooldown.
+        key = (dst_ip, severity)
+        if self._cooldown.is_cooling(key, now):
+            return
+        self._emit(dst_ip, severity, syn, ack, ratio, now)
+        self._cooldown.mark(key, now)
 
     def _emit(self, dst_ip: str, severity: str, syn: int, ack: int, ratio: float, now: float) -> None:
         self._alerts.put(Alert(
